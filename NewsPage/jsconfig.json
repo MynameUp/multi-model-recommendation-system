@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "esnext", 
+    "module": "esnext",
+    "moduleResolution": "bundler", 
+    "paths": {
+      "@/*": ["./src/*"] 
+    },
+    "lib": [
+      "esnext",
+      "dom",
+      "dom.iterable",
+      "scripthost"
+    ],
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowJs": true,
+    "checkJs": false
+  },
+  "exclude": ["node_modules", "dist"]
+}
