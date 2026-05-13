@@ -1,15 +1,20 @@
 """
-    Author: AI Assistant
-    Desc: 大语言模型接口抽象层 - 支持多种LLM接入
+    Desc: 大语言模型接口抽象层 - 仅支持魔塔社区API（OpenAI兼容接口）
     Features:
         - 统一的LLM调用接口
-        - 支持多种模型（ChatGLM、Qwen、通义千问API等）
+        - 使用魔塔社区OpenAI兼容接口（最新标准）
         - 自动降级机制
+        - 支持流式输出
+        - 原生messages格式支持
 """
 import logging
+import requests
+import json
 from abc import ABC, abstractmethod
-from typing import Optional
-from dashscope import Generation
+from typing import Optional, Generator
+
+from Recommend.LLMConfig import MODELSCOPE_CONFIG
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,7 +42,7 @@ class LLMBase(ABC):
         对话式生成
 
         Args:
-            messages: 消息列表，格式为 [{"role": "user/assistant", "content": "..."}]
+            messages: 消息列表，格式为 [{"role": "user/assistant/system", "content": "..."}]
             max_length: 最大生成长度
             temperature: 温度参数
 
@@ -46,347 +51,235 @@ class LLMBase(ABC):
         """
         pass
 
-
-class ChatGLMLLM(LLMBase):
-    """
-    ChatGLM本地模型实现
-
-    使用前需要安装：
-    pip install transformers torch accelerate sentencepiece
-
-    模型下载：
-    from transformers import AutoModel, AutoTokenizer
-    model = AutoModel.from_pretrained("THUDM/chatglm3-6b", trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm3-6b", trust_remote_code=True)
-    """
-
-    def __init__(self, model_path: str = "THUDM/chatglm3-6b", device: str = "auto"):
+    def chat_stream(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> Generator[str, None, None]:
         """
-        初始化ChatGLM模型
+        流式对话生成（可选实现）
 
         Args:
-            model_path: 模型路径或名称
-            device: 运行设备（cpu/cuda/auto）
+            messages: 消息列表
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Yields:
+            逐块生成的文本
         """
-        try:
-            from transformers import AutoModel, AutoTokenizer
-            import torch
-
-            logger.info(f"正在加载ChatGLM模型: {model_path}")
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                trust_remote_code=True
-            )
-
-            if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-
-            self.model = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True
-            ).to(device)
-
-            self.model = self.model.eval()
-            self.device = device
-
-            logger.info(f"ChatGLM模型加载成功，运行在: {device}")
-
-        except ImportError as e:
-            error_msg = f"缺少依赖库: {e}，请运行: pip install transformers torch accelerate sentencepiece"
-            logger.error(error_msg)
-            raise ImportError(error_msg)
-        except Exception as e:
-            logger.error(f"ChatGLM模型加载失败: {e}")
-            raise
-
-    def generate(self, prompt: str, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """生成文本"""
-        try:
-            response, _ = self.model.chat(
-                self.tokenizer,
-                prompt,
-                history=[],
-                max_length=max_length,
-                temperature=temperature
-            )
-            return response
-        except Exception as e:
-            logger.error(f"ChatGLM生成失败: {e}")
-            return ""
-
-    def chat(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """对话式生成"""
-        try:
-            # 转换消息格式为ChatGLM的history格式
-            history = []
-            for msg in messages[:-1]:
-                if msg["role"] == "user":
-                    history.append((msg["content"], ""))
-                elif msg["role"] == "assistant" and history:
-                    history[-1] = (history[-1][0], msg["content"])
-
-            current_prompt = messages[-1]["content"] if messages else ""
-
-            response, _ = self.model.chat(
-                self.tokenizer,
-                current_prompt,
-                history=history,
-                max_length=max_length,
-                temperature=temperature
-            )
-            return response
-        except Exception as e:
-            logger.error(f"ChatGLM对话失败: {e}")
-            return ""
+        raise NotImplementedError("流式输出未在此LLM中实现")
 
 
-class QwenLLM(LLMBase):
+class ModelScopeLLM(LLMBase):
     """
-    通义千问本地模型实现
+    魔塔社区（ModelScope）API实现 - 使用OpenAI兼容接口
 
-    使用前需要安装：
-    pip install transformers torch accelerate tiktoken
+    使用官方推荐的OpenAI SDK调用方式，无需本地GPU或下载模型
 
-    模型下载：
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen-7B-Chat", trust_remote_code=True)
-    """
-
-    def __init__(self, model_path: str = "Qwen/Qwen-7B-Chat", device: str = "auto"):
-        """
-        初始化Qwen模型
-
-        Args:
-            model_path: 模型路径或名称
-            device: 运行设备
-        """
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            import torch
-
-            logger.info(f"正在加载Qwen模型: {model_path}")
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                trust_remote_code=True
-            )
-
-            if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                device_map="auto" if device == "cuda" else None
-            )
-
-            if device != "cuda":
-                self.model = self.model.to(device)
-
-            self.model = self.model.eval()
-            self.device = device
-
-            logger.info(f"Qwen模型加载成功，运行在: {device}")
-
-        except ImportError as e:
-            error_msg = f"缺少依赖库: {e}，请运行: pip install transformers torch accelerate tiktoken"
-            logger.error(error_msg)
-            raise ImportError(error_msg)
-        except Exception as e:
-            logger.error(f"Qwen模型加载失败: {e}")
-            raise
-
-    def generate(self, prompt: str, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """生成文本"""
-        try:
-            response, history = self.model.chat(
-                self.tokenizer,
-                prompt,
-                history=None,
-                max_length=max_length,
-                temperature=temperature
-            )
-            return response
-        except Exception as e:
-            logger.error(f"Qwen生成失败: {e}")
-            return ""
-
-    def chat(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """对话式生成"""
-        try:
-            # 构建完整的对话历史
-            history = []
-            for msg in messages[:-1]:
-                role = "USER" if msg["role"] == "user" else "ASSISTANT"
-                history.append((msg["content"], "" if role == "USER" else msg["content"]))
-
-            current_prompt = messages[-1]["content"] if messages else ""
-
-            response, _ = self.model.chat(
-                self.tokenizer,
-                current_prompt,
-                history=history,
-                max_length=max_length,
-                temperature=temperature
-            )
-            return response
-        except Exception as e:
-            logger.error(f"Qwen对话失败: {e}")
-            return ""
-
-
-class DashScopeLLM(LLMBase):
-    """
-    阿里云通义千问API实现（无需本地GPU）
+    优势：
+        - 国内访问稳定，无SSL问题
+        - OpenAI API标准兼容，易于迁移
+        - 丰富的模型选择（Qwen、ChatGLM等）
+        - 免费额度充足
+        - 无需本地GPU，无需下载模型
+        - 原生支持messages格式和流式输出
 
     使用前需要：
-    1. 注册阿里云账号并开通DashScope服务
-    2. 获取API Key
-    3. 安装SDK: pip install dashscope
+        1. 注册魔塔社区账号: https://modelscope.cn/
+        2. 获取 API Token（个人中心 → Access Token）
+        3. 确保网络可以访问 modelscope.cn
+        4. 安装OpenAI SDK: pip install openai
+
+    支持的模型（完整列表见魔塔社区）：
+        - qwen/Qwen-7B-Chat（推荐，平衡性能）
+        - qwen/Qwen-14B-Chat（更强性能）
+        - qwen/Qwen-72B-Chat（最强性能）
+        - ZhipuAI/chatglm3-6b
+        - Qwen/Qwen2.5-Coder-32B-Instruct（代码专用）
     """
 
-    def __init__(self, api_key: str, model_name: str = "qwen-turbo"):
+    def __init__(self, api_token: str, model_name: str = "qwen/Qwen-7B-Chat"):
         """
-        初始化DashScope API
+        初始化魔塔社区API（OpenAI兼容接口）
 
         Args:
-            api_key: 阿里云API Key
-            model_name: 模型名称（qwen-turbo/qwen-plus/qwen-max）
+            api_token: 魔塔社区 API Token
+            model_name: 模型名称（完整路径，如 qwen/Qwen-7B-Chat）
         """
         try:
-            import dashscope
-            dashscope.api_key = api_key
+            from openai import OpenAI
 
+            self.api_token = api_token
             self.model_name = model_name
-            self.api_key = api_key
 
-            logger.info(f"DashScope API初始化成功，使用模型: {model_name}")
+            # 验证Token是否有效
+            if not api_token or api_token == 'your_modelscope_token_here':
+                logger.warning("未提供有效的魔塔社区Token，将使用降级方案")
+                raise ValueError("Invalid API token")
+
+            # 初始化OpenAI客户端（使用魔塔社区的OpenAI兼容接口）
+            self.client = OpenAI(
+                api_key=api_token,
+                base_url="https://api-inference.modelscope.cn/v1/"
+            )
+
+            logger.info(f"魔塔社区API初始化成功（OpenAI兼容接口）")
+            logger.info(f"使用模型: {model_name}")
+            logger.info(f"API端点: https://api-inference.modelscope.cn/v1/")
 
         except ImportError:
-            error_msg = "未安装dashscope库，请运行: pip install dashscope"
-            logger.error(error_msg)
-            raise ImportError(error_msg)
+            logger.error("未安装openai库，请运行: pip install openai")
+            raise
         except Exception as e:
-            logger.error(f"DashScope API初始化失败: {e}")
+            logger.error(f"魔塔社区API初始化失败: {e}")
             raise
 
     def generate(self, prompt: str, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """生成文本"""
-        try:
-            response = Generation.call(
-                model=self.model_name,
-                prompt=prompt,
-                max_tokens=max_length,
-                temperature=temperature
-            )
-
-            if response.status_code == 200:
-                return response.output.text
-            else:
-                logger.error(f"DashScope API调用失败: {response.message}")
-                return ""
-
-        except Exception as e:
-            logger.error(f"DashScope生成失败: {e}")
-            return ""
-
-    def chat(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """对话式生成"""
-        try:
-            from dashscope import Generation
-
-            # 转换消息格式
-            dashscope_messages = []
-            for msg in messages:
-                dashscope_messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-
-            response = Generation.call(
-                model=self.model_name,
-                messages=dashscope_messages,
-                max_tokens=max_length,
-                temperature=temperature
-            )
-
-            if response.status_code == 200:
-                return response.output.text
-            else:
-                logger.error(f"DashScope API调用失败: {response.message}")
-                return ""
-
-        except Exception as e:
-            logger.error(f"DashScope对话失败: {e}")
-            return ""
-
-
-class ZhipuAILLM(LLMBase):
-    """
-    智谱AI GLM API实现
-
-    使用前需要：
-    1. 注册智谱AI账号并获取API Key
-    2. 安装SDK: pip install zhipuai
-    """
-
-    def __init__(self, api_key: str, model_name: str = "glm-4"):
         """
-        初始化智谱AI API
+        生成文本（兼容旧接口，内部转换为messages格式）
 
         Args:
-            api_key: 智谱AI API Key
-            model_name: 模型名称（glm-4/glm-3-turbo）
+            prompt: 输入提示词
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Returns:
+            生成的文本
         """
         try:
-            from zhipuai import ZhipuAI
+            # 将prompt转换为messages格式
+            messages = [
+                {"role": "user", "content": prompt}
+            ]
 
-            self.client = ZhipuAI(api_key=api_key)
-            self.model_name = model_name
+            # 调用chat方法
+            return self.chat(messages, max_length, temperature)
 
-            logger.info(f"智谱AI API初始化成功，使用模型: {model_name}")
-
-        except ImportError:
-            error_msg = "未安装zhipuai库，请运行: pip install zhipuai"
-            logger.error(error_msg)
-            raise ImportError(error_msg)
         except Exception as e:
-            logger.error(f"智谱AI API初始化失败: {e}")
-            raise
-
-    def generate(self, prompt: str, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """生成文本"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_length,
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"智谱AI生成失败: {e}")
+            logger.error(f"魔塔社区生成失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
             return ""
 
     def chat(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> str:
-        """对话式生成"""
+        """
+        对话式生成（使用OpenAI兼容接口）
+
+        Args:
+            messages: 消息列表，格式为 [{"role": "user/assistant/system", "content": "..."}]
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Returns:
+            生成的回复
+        """
         try:
+            logger.info(f"调用魔塔社区API，模型: {self.model_name}")
+
+            # 第一次尝试
+            response = self._make_api_call(messages, max_length, temperature)
+
+            # 检查响应是否有效
+            if response and len(response.strip()) > 10:
+                logger.info(f"魔塔社区API调用成功，生成长度: {len(response)}")
+                return response
+
+            # 如果第一次返回空，尝试重试一次
+            logger.warning("第一次调用返回空响应，尝试重试...")
+            response = self._make_api_call(messages, max_length, temperature)
+
+            if response and len(response.strip()) > 10:
+                logger.info(f"重试成功，生成长度: {len(response)}")
+                return response
+
+            logger.error("两次调用都返回空响应")
+            return ""
+
+        except Exception as e:
+            logger.error(f"魔塔社区对话失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            return ""
+
+    def _make_api_call(self, messages: list, max_length: int, temperature: float) -> str:
+        """执行单次API调用"""
+        try:
+            # 调用OpenAI兼容接口
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 max_tokens=max_length,
-                temperature=temperature
+                temperature=temperature,
+                top_p=0.8,
+                stream=False
             )
-            return response.choices[0].message.content
+
+            # 详细记录响应
+            logger.debug(f"API响应对象: {response}")
+            logger.debug(f"Choices: {response.choices}")
+
+            # 提取生成的文本
+            if response.choices and len(response.choices) > 0:
+                choice = response.choices[0]
+                logger.debug(f"Choice: {choice}")
+
+                if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                    generated_text = choice.message.content
+                    if generated_text:
+                        return generated_text
+                    else:
+                        logger.warning("Content字段为空")
+                        return ""
+                else:
+                    logger.error(f"Choice结构异常: {choice}")
+                    return ""
+            else:
+                logger.error("API返回空choices")
+                return ""
+
         except Exception as e:
-            logger.error(f"智谱AI对话失败: {e}")
-            return ""
+            logger.error(f"API调用异常: {e}")
+            raise
+
+
+    def chat_stream(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> Generator[str, None, None]:
+        """
+        流式对话生成（实时输出）
+
+        Args:
+            messages: 消息列表
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Yields:
+            逐块生成的文本片段
+        """
+        try:
+            logger.info(f"调用魔塔社区API（流式），模型: {self.model_name}")
+
+            # 调用流式接口
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_tokens=max_length,
+                temperature=temperature,
+                top_p=0.8,
+                stream=True  # 启用流式模式
+            )
+
+            # 逐块返回生成的文本
+            for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta_content = chunk.choices[0].delta.content
+                    if delta_content:
+                        yield delta_content
+
+        except Exception as e:
+            logger.error(f"魔塔社区流式对话失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            yield ""
 
 
 class FallbackLLM(LLMBase):
     """
-    降级LLM实现（当其他模型不可用时使用）
+    降级LLM实现（当魔塔社区API不可用时使用）
     使用规则-based方法生成答案
     """
 
@@ -408,27 +301,35 @@ class FallbackLLM(LLMBase):
         return f"抱歉，当前无法连接到智能模型。关于您的问题：{question[:50]}...，建议您查阅相关新闻原文获取详细信息。"
 
 
-def create_llm(llm_type: str = "fallback", **kwargs) -> LLMBase:
+def create_llm(llm_type: str = "modelscope", **kwargs) -> LLMBase:
     """
-    工厂函数：创建LLM实例
+    工厂函数：创建LLM实例（仅支持魔塔社区）
 
     Args:
         llm_type: LLM类型
-            - "chatglm": ChatGLM本地模型
-            - "qwen": 通义千问本地模型
-            - "dashscope": 阿里云通义千问API
-            - "zhipuai": 智谱AI API
+            - "modelscope": 魔塔社区API（唯一支持的在线LLM，使用OpenAI兼容接口）
             - "fallback": 降级方案（规则-based）
+
         **kwargs: 其他参数
+            - api_token: 魔塔社区Token（必填）
+            - model_name: 模型名称（可选，默认 qwen/Qwen-7B-Chat）
 
     Returns:
         LLM实例
+
+    Examples:
+        # 使用魔塔社区（OpenAI兼容接口）
+        >>> llm = create_llm(
+        ...     llm_type='modelscope',
+        ...     api_token='your_token',
+        ...     model_name='qwen/Qwen-7B-Chat'
+        ... )
+
+        # 使用降级方案
+        >>> llm = create_llm(llm_type='fallback')
     """
     llm_registry = {
-        "chatglm": ChatGLMLLM,
-        "qwen": QwenLLM,
-        "dashscope": DashScopeLLM,
-        "zhipuai": ZhipuAILLM,
+        "modelscope": ModelScopeLLM,
         "fallback": FallbackLLM
     }
 
@@ -443,3 +344,65 @@ def create_llm(llm_type: str = "fallback", **kwargs) -> LLMBase:
     except Exception as e:
         logger.error(f"创建LLM实例失败: {e}，使用降级方案")
         return FallbackLLM()
+
+
+def get_qa_params():
+    """
+    获取问答系统的默认参数
+
+    Returns:
+        dict: 问答参数字典
+    """
+    from Recommend.LLMConfig import QA_CONFIG
+    return {
+        'max_length': QA_CONFIG.get('max_answer_length', 512),
+        'temperature': QA_CONFIG.get('temperature', 0.7),
+        'top_k_related': QA_CONFIG.get('top_k_related_news', 5),
+    }
+
+
+def validate_llm_config(llm_type: str = "modelscope") -> dict:
+    """
+    验证LLM配置是否完整
+
+    Args:
+        llm_type: LLM类型
+
+    Returns:
+        dict: {
+            'valid': bool,
+            'missing_fields': list,
+            'message': str
+        }
+    """
+    if llm_type.lower() == "fallback":
+        return {
+            'valid': True,
+            'missing_fields': [],
+            'message': '配置有效'
+        }
+
+    if llm_type.lower() != "modelscope":
+        return {
+            'valid': False,
+            'missing_fields': [],
+            'message': f'不支持的LLM类型: {llm_type}，仅支持 modelscope 和 fallback'
+        }
+
+    from Recommend.LLMConfig import MODELSCOPE_CONFIG
+
+    api_token = MODELSCOPE_CONFIG.get('api_token', '')
+
+    if not api_token or api_token == 'your_modelscope_token_here':
+        return {
+            'valid': False,
+            'missing_fields': ['api_token'],
+            'message': '缺少魔塔社区 API Token，请在 LLMConfig.py 中填写'
+        }
+
+    return {
+        'valid': True,
+        'missing_fields': [],
+        'message': '配置有效'
+    }
+

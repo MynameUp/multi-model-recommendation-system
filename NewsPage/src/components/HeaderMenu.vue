@@ -31,15 +31,25 @@
           <Avatar :src="userImg" icon="ios-person" size="large"></Avatar>
         </Badge>
         <DropdownMenu slot="list">
-          <DropdownItem name="1" @click.native="toMessage">查看消息</DropdownItem>
-          <DropdownItem name="2" @click.native="toUser">个人中心</DropdownItem>
+          <DropdownItem name="1" @click.native="toMessage">
+            <Icon type="ios-mail" style="margin-right: 5px;"></Icon>
+            查看消息
+          </DropdownItem>
+          <DropdownItem name="2" @click.native="toUser">
+            <Icon type="ios-person" style="margin-right: 5px;"></Icon>
+            个人中心
+          </DropdownItem>
           <!-- 新增：问答历史菜单项 -->
           <DropdownItem name="4" @click.native="toQAHistory" v-if="displayornot">
             <Icon type="ios-chatbubbles" style="margin-right: 5px;"></Icon>
             问答历史
           </DropdownItem>
-          <DropdownItem divided name="3">退出登录</DropdownItem>
+          <DropdownItem divided name="3">
+            <Icon type="ios-log-out" style="margin-right: 5px;"></Icon>
+            退出登录
+          </DropdownItem>
         </DropdownMenu>
+
       </Dropdown>
     </Menu>
   </div>

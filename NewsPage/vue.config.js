@@ -11,14 +11,7 @@ module.exports = defineConfig({
         pathRewrite: {
           '^/api': ''                    // 核心魔法：把 '/api' 抹掉。这样 '/api/news/all/' 就会变成后端的 '/news/all/'
         }
-      },
-       '/api/agent': {
-         target: 'http://localhost:8000',
-         changeOrigin: true,
-         pathRewrite: {
-           '^/api/agent': '/api/agent'
-         }
-       }
+      }
     }
   }
 })

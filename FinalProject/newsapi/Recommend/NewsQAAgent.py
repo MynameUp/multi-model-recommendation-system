@@ -1,11 +1,10 @@
 """
-    Author: AI Assistant
-    Desc: 新闻问答智能体 - 基于RAG的新闻问答系统（LLM增强版）
+    Desc: 新闻问答智能体 - 基于RAG的新闻问答系统（仅使用魔塔社区API）
     Features:
         - 新闻向量化存储
         - 语义检索
         - 上下文拼接
-        - LLM智能问答生成
+        - 魔塔社区LLM智能问答生成
         - 自动降级机制
 """
 import json
@@ -14,46 +13,33 @@ from typing import List, Dict
 import numpy as np
 from news_api.qa_dao import QAHistoryDAO
 import pymysql
-from sentence_transformers import SentenceTransformer
-import faiss
 from Spider.settings import DB_HOST, DB_USER, DB_PASSWD, DB_NAME, DB_PORT
-from Recommend.LLMInterface import create_llm
-import os
-import ssl
+from Recommend.LLMInterface import create_llm, get_qa_params
+
 logger = logging.getLogger(__name__)
 
 
 class NewsQAEmbedding:
-    """新闻向量化处理器"""
+    """新闻向量化处理器（简化版，使用TF-IDF避免模型下载问题）"""
 
-    def __init__(self, model_name='paraphrase-multilingual-MiniLM-L12-v2'):
+    def __init__(self):
         """
-        初始化向量模型
-
-        Args:
-            model_name: 预训练模型名称，支持多语言
+        初始化向量模型（使用TF-IDF，无需下载任何模型）
         """
-        logger.info(f"加载向量模型: {model_name}")
+        logger.info("初始化TF-IDF向量器（无需下载模型）")
 
-        # 禁用SSL验证以解决证书问题（仅用于开发环境）
-        try:
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        from sklearn.feature_extraction.text import TfidfVectorizer
 
-            # 设置环境变量禁用SSL验证
-            os.environ['CURL_CA_BUNDLE'] = ''
-            os.environ['REQUESTS_CA_BUNDLE'] = ''
+        self.tfidf_vectorizer = TfidfVectorizer(
+            max_features=384,
+            stop_words=None,
+            ngram_range=(1, 2),
+            sublinear_tf=True
+        )
+        self.is_fitted = False
+        self.embedding_dim = 384
 
-            # 创建不验证SSL的上下文
-            ssl._create_default_https_context = ssl._create_unverified_context
-
-            logger.info("已禁用SSL验证以加载模型")
-        except Exception as e:
-            logger.warning(f"禁用SSL验证失败: {e}，将尝试正常加载")
-
-        self.model = SentenceTransformer(model_name)
-        self.embedding_dim = self.model.get_sentence_embedding_dimension()
-        logger.info(f"向量维度: {self.embedding_dim}")
+        logger.info(f"TF-IDF向量器初始化完成，维度: {self.embedding_dim}")
 
     def encode(self, texts: List[str]) -> np.ndarray:
         """
@@ -68,13 +54,24 @@ class NewsQAEmbedding:
         if not texts:
             return np.array([])
 
-        embeddings = self.model.encode(
-            texts,
-            batch_size=32,
-            show_progress_bar=False,
-            normalize_embeddings=True
-        )
-        return embeddings
+        if not self.is_fitted:
+            # 首次使用时拟合
+            self.tfidf_vectorizer.fit(texts)
+            self.is_fitted = True
+        else:
+            # 后续使用时部分拟合
+            try:
+                self.tfidf_vectorizer.partial_fit(texts)
+            except:
+                pass
+
+        vectors = self.tfidf_vectorizer.transform(texts).toarray()
+
+        # 归一化
+        from sklearn.preprocessing import normalize
+        vectors = normalize(vectors)
+
+        return vectors
 
     def encode_single(self, text: str) -> np.ndarray:
         """
@@ -86,7 +83,7 @@ class NewsQAEmbedding:
         Returns:
             一维numpy数组
         """
-        return self.model.encode([text], normalize_embeddings=True)[0]
+        return self.encode([text])[0]
 
 
 class NewsVectorStore:
@@ -122,6 +119,7 @@ class NewsVectorStore:
     def _init_faiss_index(self):
         """初始化FAISS索引"""
         try:
+            import faiss
             # 使用内积索引（因为向量已归一化，内积等价于余弦相似度）
             dimension = self.embedding_model.embedding_dim
             self.faiss_index = faiss.IndexFlatIP(dimension)
@@ -227,6 +225,12 @@ class NewsVectorStore:
             相似新闻列表，包含news_id和相似度分数
         """
         try:
+            # 检查FAISS索引是否为空
+            if self.faiss_index.ntotal == 0:
+                logger.warning("FAISS索引为空，无法搜索相似新闻")
+                logger.info("提示: 请先运行 'python manage.py init_vectors' 初始化向量数据")
+                return []
+
             # 生成查询向量
             query_vector = self.embedding_model.encode_single(query_text)
             query_vector_2d = query_vector.reshape(1, -1).astype(np.float32)
@@ -236,7 +240,7 @@ class NewsVectorStore:
 
             results = []
             for score, idx in zip(scores[0], indices[0]):
-                if idx < len(self.news_id_mapping):
+                if idx != -1 and idx < len(self.news_id_mapping):  # 过滤无效索引
                     news_id = self.news_id_mapping[idx]
                     results.append({
                         'news_id': news_id,
@@ -251,6 +255,8 @@ class NewsVectorStore:
 
         except Exception as e:
             logger.error(f"搜索相似新闻失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
             return []
 
     def get_news_detail(self, news_id: int) -> Dict:
@@ -291,23 +297,23 @@ class NewsVectorStore:
 
 
 class NewsQAAgent:
-    """新闻问答智能体（LLM增强版）"""
+    """新闻问答智能体（仅使用魔塔社区API）"""
 
-    def __init__(self, llm_type: str = "fallback", **llm_kwargs):
+    def __init__(self, llm_type: str = "modelscope", **llm_kwargs):
         """
         初始化新闻问答智能体
 
         Args:
-            llm_type: LLM类型（chatglm/qwen/dashscope/zhipuai/fallback）
-            **llm_kwargs: LLM初始化参数
+            llm_type: LLM类型（固定为 modelscope 或 fallback）
+            **llm_kwargs: LLM初始化参数（api_token, model_name等）
         """
         self.vector_store = NewsVectorStore()
         self.db = self.vector_store.db
         self.cursor = self.vector_store.cursor
 
-        # 初始化LLM
+        # 初始化LLM（使用魔塔社区API）
         logger.info(f"初始化LLM，类型: {llm_type}")
-        self.llm = create_llm(llm_type, **llm_kwargs)
+        self.llm = create_llm(llm_type=llm_type, **llm_kwargs)
 
     def answer_question(self, user_id: int, news_id: int, question: str) -> Dict:
         """
@@ -340,7 +346,7 @@ class NewsQAAgent:
         # 4. 构建上下文
         context = self._build_context(current_news, related_news_list[:3])
 
-        # 5. 使用LLM生成答案
+        # 5. 使用魔塔社区LLM生成答案
         answer = self._generate_answer_with_llm(question, context, current_news)
 
         # 6. 获取相关新闻的详细信息
@@ -410,7 +416,7 @@ class NewsQAAgent:
 
     def _generate_answer_with_llm(self, question: str, context: str, current_news: Dict) -> str:
         """
-        使用LLM生成问题答案
+        使用魔塔社区LLM生成问题答案
 
         Args:
             question: 用户问题
@@ -425,10 +431,11 @@ class NewsQAAgent:
 
         try:
             # 调用LLM生成答案
+            qa_params = get_qa_params()
             answer = self.llm.generate(
                 prompt=prompt,
-                max_length=512,
-                temperature=0.7
+                max_length=qa_params['max_length'],
+                temperature=qa_params['temperature']
             )
 
             if answer and len(answer.strip()) > 10:
@@ -454,18 +461,23 @@ class NewsQAAgent:
             提示词字符串
         """
         prompt_template = """你是一个专业的新闻问答助手。请根据提供的新闻内容，准确、简洁地回答用户的问题。
-                            【要求】
-                            1. 答案必须基于提供的新闻内容，不要编造信息
-                            2. 如果新闻中没有相关信息，请明确说明
-                            3. 答案要简洁明了，控制在200字以内
-                            4. 使用中文回答
-                            5. 保持客观中立的态度
-                            【新闻内容】
-                            {context}
-                            【用户问题】
-                            {question}
-                            【你的回答】
-                            """
+
+【要求】
+1. 答案必须基于提供的新闻内容，不要编造信息
+2. 如果新闻中没有相关信息，请明确说明
+3. 答案要简洁明了，控制在200字以内
+4. 使用中文回答
+5. 保持客观中立的态度
+
+【新闻内容】
+{context}
+
+【用户问题】
+{question}
+
+【你的回答】
+"""
+
         prompt = prompt_template.format(
             context=context,
             question=question
@@ -485,178 +497,15 @@ class NewsQAAgent:
         Returns:
             生成的答案
         """
-        question_lower = question.lower()
-
-        # 问题类型识别
-        if any(keyword in question for keyword in ['讲了什么', '主要内容', '核心观点', '说什么']):
-            return self._generate_summary_answer(current_news)
-
-        elif any(keyword in question for keyword in ['关键人物', '重要人物', '提到谁']):
-            return self._extract_key_persons(current_news)
-
-        elif any(keyword in question for keyword in ['背景', '原因', '为什么发生']):
-            return self._generate_background_answer(current_news, context)
-
-        elif any(keyword in question for keyword in ['重要', '意义', '影响', '价值']):
-            return self._generate_importance_answer(current_news, context)
-
-        elif any(keyword in question for keyword in ['类似', '相关', '对比']):
-            return self._generate_comparison_answer(context, current_news)
-
-        else:
-            # 通用答案
-            return self._generate_general_answer(question, context, current_news)
-
-    def _generate_summary_answer(self, news: Dict) -> str:
-        """生成新闻摘要答案"""
-        title = news.get('title', '')
-        mainpage = news.get('mainpage', '')
-
-        # 提取前200字作为摘要
-        summary = mainpage[:200] if mainpage else ''
-
-        answer = f"这篇新闻的标题是《{title}》。\n\n"
-        if summary:
-            answer += f"主要内容：{summary}...\n"
-
-        answer += f"\n这条新闻来自{news.get('origin', '未知来源')}，发布于{news.get('date', '未知时间')}。"
-
-        return answer
-
-    def _extract_key_persons(self, news: Dict) -> str:
-        """提取关键人物"""
-        mainpage = news.get('mainpage', '')
-        title = news.get('title', '')
-
-        # 简单的人名提取（可以改进为使用NER模型）
-        import re
-        persons = []
-
-        # 常见的称谓模式
-        patterns = [
-            r'([\u4e00-\u9fa5]{2,4})(?:先生|女士|教授|博士|主席|总理|部长|局长)',
-            r'([\u4e00-\u9fa5·]{2,5})(?:表示|指出|认为|说|强调)',
-        ]
-
-        for pattern in patterns:
-            matches = re.findall(pattern, title + mainpage[:500])
-            persons.extend([m[0] if isinstance(m, tuple) else m for m in matches])
-
-        # 去重
-        persons = list(set(persons))[:5]
-
-        if persons:
-            answer = f"这篇新闻中提到的关键人物包括：\n"
-            for i, person in enumerate(persons, 1):
-                answer += f"{i}. {person}\n"
-        else:
-            answer = "根据新闻内容，没有明确提及具体的人物姓名。建议您阅读完整新闻以获取更多信息。"
-
-        return answer
-
-    def _generate_background_answer(self, news: Dict, context: str) -> str:
-        """生成背景信息答案"""
-        title = news.get('title', '')
-        mainpage = news.get('mainpage', '')
-
-        answer = f"关于《{title}》的背景信息：\n\n"
-
-        # 尝试从正文中提取背景信息（通常在开头或结尾）
-        paragraphs = mainpage.split('\n')
-        background_info = ""
-
-        # 取前两段作为背景
-        for para in paragraphs[:2]:
-            if len(para) > 50:
-                background_info = para
-                break
-
-        if background_info:
-            answer += f"{background_info}\n\n"
-
-        answer += "这条新闻反映了当前社会的相关动态，建议您结合相关新闻一起了解更全面的信息。"
-
-        return answer
-
-    def _generate_importance_answer(self, news: Dict, context: str) -> str:
-        """生成重要性分析答案"""
-        title = news.get('title', '')
-        category = news.get('category', 0)
-        readnum = news.get('readnum', 0)
-        comments = news.get('comments', 0)
-
-        category_map = {
-            0: "美股", 1: "国内", 2: "国际", 3: "国际",
-            4: "体育", 5: "娱乐", 6: "军事",
-            7: "科技", 8: "财经", 9: "股市"
-        }
-
-        category_name = category_map.get(category, "其他")
-
-        answer = f"《{title}》这条新闻的重要性体现在以下几个方面：\n\n"
-
-        # 1. 热度指标
-        if readnum > 5000 or comments > 100:
-            answer += f"1. **关注度高**：该新闻已获得{readnum}次阅读和{comments}条评论，说明公众对此话题高度关注。\n\n"
-        else:
-            answer += f"1. **专业价值**：虽然关注度不是特别高，但在{category_name}领域具有专业价值。\n\n"
-
-        # 2. 类别重要性
-        if category in [1, 2, 7, 8]:  # 国内、国际、科技、财经
-            answer += f"2. **领域重要性**：作为{category_name}类新闻，这类信息对于了解当前社会/经济发展趋势具有重要意义。\n\n"
-        else:
-            answer += f"2. **领域价值**：属于{category_name}领域，对关注该领域的读者具有参考价值。\n\n"
-
-        answer += "3. **时效性**：新闻报道的是最新发生的事件，及时了解有助于把握当前动态。\n"
-
-        return answer
-
-    def _generate_comparison_answer(self, context: str, current_news: Dict) -> str:
-        """生成对比分析答案"""
-        title = current_news.get('title', '')
-
-        answer = f"关于《{title}》的相关新闻对比：\n\n"
-
-        # 从上下文中提取相关新闻
-        if "【相关新闻】" in context:
-            related_section = context.split("【相关新闻】")[1]
-            answer += f"我们找到了以下几条相关新闻：\n\n{related_section.strip()}\n\n"
-            answer += "这些新闻从不同角度报道了类似事件，您可以对比阅读以获得更全面的理解。"
-        else:
-            answer += "目前没有找到太多直接相关的新闻进行对比。建议您关注后续的相关报道。"
-
-        return answer
-
-    def _generate_general_answer(self, question: str, context: str, current_news: Dict) -> str:
-        """生成通用答案"""
         title = current_news.get('title', '')
         mainpage = current_news.get('mainpage', '')
 
-        answer = f"针对您的问题，我基于新闻《{title}》的内容为您提供以下信息：\n\n"
+        answer = f"关于《{title}》这条新闻：\n\n"
 
-        # 提取相关内容（简单关键词匹配）
-        question_words = question.replace('？', '').replace('?', '').split()
+        if mainpage:
+            answer += f"新闻主要内容：{mainpage[:300]}...\n\n"
 
-        relevant_sentences = []
-        sentences = mainpage.split('。')
-
-        for sentence in sentences:
-            if any(word in sentence for word in question_words if len(word) > 1):
-                relevant_sentences.append(sentence)
-
-        if relevant_sentences:
-            answer += "新闻中提到：\n"
-            for sent in relevant_sentences[:3]:
-                answer += f"- {sent}。\n"
-        else:
-            # 如果没有找到直接相关的内容，返回新闻摘要
-            summary = mainpage[:300] if mainpage else ""
-            if summary:
-                answer += f"新闻的主要内容是：{summary}...\n"
-            else:
-                answer += "抱歉，我无法从当前新闻中找到与您问题直接相关的信息。"
-
-        answer += "\n如果您需要更深入的分析，建议查阅更多相关资料。"
+        answer += "建议您阅读完整新闻以获取更多详细信息。"
 
         return answer
 
@@ -673,16 +522,20 @@ class NewsQAAgent:
         self.vector_store.close()
 
 
-def beginNewsQA(user_id: int, news_id: int, question: str, llm_type: str = "fallback", **llm_kwargs) -> Dict:
+def beginNewsQA(user_id: int, news_id: int, question: str,
+                llm_type: str = "modelscope",
+                **llm_kwargs) -> Dict:
     """
-    新闻问答入口函数
+    新闻问答入口函数（仅使用魔塔社区API）
 
     Args:
         user_id: 用户ID
         news_id: 新闻ID
         question: 用户问题
-        llm_type: LLM类型（chatglm/qwen/dashscope/zhipuai/fallback）
+        llm_type: LLM类型（modelscope 或 fallback）
         **llm_kwargs: LLM初始化参数
+            - api_token: 魔塔社区Token（必填）
+            - model_name: 模型名称（可选）
 
     Returns:
         问答结果字典
@@ -749,3 +602,4 @@ def initNewsVectors(batch_size: int = 100) -> int:
         return success_count
     finally:
         vector_store.close()
+

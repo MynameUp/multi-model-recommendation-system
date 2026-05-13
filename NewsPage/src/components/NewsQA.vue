@@ -167,7 +167,7 @@ export default {
 
       const question = this.currentQuestion.trim()
       this.currentQuestion = ''
-      
+
       // 添加问题到列表
       this.qaList.push({
         question: question,
@@ -177,7 +177,7 @@ export default {
       })
 
       this.isAsking = true
-      
+
       // 滚动到底部
       this.$nextTick(() => {
         this.scrollToBottom()
@@ -185,6 +185,9 @@ export default {
 
       try {
         // 调用后端API
+        // 前端请求: /api/agent/news-qa/
+        // 代理重写: /agent/news-qa/
+        // 后端匹配: agent/news-qa/ ✅
         const response = await axios.post('/api/agent/news-qa/', {
           userId: this.getUserId(),
           newsId: this.newsId,
@@ -198,26 +201,27 @@ export default {
           lastQA.answer = response.data.data.answer
           lastQA.relatedNews = response.data.data.relatedNews || []
           lastQA.loading = false
-          
+
           this.$message.success('回答完成')
         } else {
           throw new Error(response.data.message || '回答失败')
         }
       } catch (error) {
-        console.error('问答失败:', error)
+        console.error('[News QA] 问答失败:', error)
         const lastQA = this.qaList[this.qaList.length - 1]
         lastQA.answer = '抱歉，回答失败：' + (error.message || '网络错误')
         lastQA.loading = false
-        
+
         this.$message.error('问答失败，请重试')
       } finally {
         this.isAsking = false
-        
+
         // 滚动到底部
         this.$nextTick(() => {
           this.scrollToBottom()
         })
       }
+
     },
 
     /**
@@ -234,13 +238,13 @@ export default {
     viewRelatedNews(news) {
       // 关闭对话框
       this.showQADialog = false
-      
+
       // 跳转到相关新闻页面
       this.$router.push({
         path: '/news-detail',
-        query: { id: news.id }
+        query: {id: news.id}
       })
-      
+
       this.$message.info(`正在查看: ${news.title}`)
     },
 
@@ -269,62 +273,67 @@ export default {
      * 获取用户ID
      */
     getUserId() {
-      // 从localStorage或Vuex获取用户ID
-      const user = JSON.parse(localStorage.getItem('user') || '{}')
-      return user.userid || 1
+      // 从sessionStorage获取用户ID（与登录时存储的位置一致）
+      const userId = sessionStorage.getItem('userId')
+      if (userId) {
+        return parseInt(userId)
+      }
+
+      // 兼容旧版本：尝试从localStorage获取user对象
+      try {
+        const user = JSON.parse(localStorage.getItem('user') || '{}')
+        if (user.userid || user.id) {
+          return parseInt(user.userid || user.id)
+        }
+      } catch (e) {
+        console.warn('[News QA] 解析用户信息失败:', e)
+      }
+
+      // 如果都没有，返回1作为默认值
+      return 1
     }
   }
 }
 </script>
-
 <style scoped>
 .news-qa-container {
   display: inline-block;
 }
-
 .qa-trigger-btn {
   margin-left: 10px;
   padding-top: 10px;
 }
-
 .qa-dialog ::v-deep .el-dialog__body {
   padding: 20px;
   height: 600px;
 }
-
 .qa-content {
   display: flex;
   flex-direction: column;
   height: 100%;
 }
-
 .current-news-info {
   padding-bottom: 15px;
   border-bottom: 2px solid #409EFF;
   margin-bottom: 15px;
 }
-
 .current-news-info h4 {
   margin: 0 0 10px 0;
   color: #409EFF;
 }
-
 .news-title {
   font-size: 16px;
   font-weight: bold;
   margin: 5px 0;
   color: #303133;
 }
-
 .news-meta {
   font-size: 12px;
   color: #909399;
 }
-
 .news-meta span {
   margin-right: 20px;
 }
-
 .qa-history {
   flex: 1;
   overflow-y: auto;
@@ -333,48 +342,39 @@ export default {
   border-radius: 4px;
   margin-bottom: 15px;
 }
-
 .empty-tip {
   text-align: center;
   padding: 40px 20px;
   color: #909399;
 }
-
 .empty-tip i {
   font-size: 48px;
   margin-bottom: 10px;
 }
-
 .quick-questions {
   margin-top: 20px;
 }
-
 .quick-question-tag {
   margin: 5px;
   cursor: pointer;
   transition: all 0.3s;
 }
-
 .quick-question-tag:hover {
   background-color: #409EFF;
   color: white;
 }
-
 .qa-item {
   margin-bottom: 20px;
 }
-
 .question-item,
 .answer-item {
   display: flex;
   align-items: flex-start;
   margin-bottom: 10px;
 }
-
 .question-item {
   flex-direction: row-reverse;
 }
-
 .avatar {
   width: 40px;
   height: 40px;
@@ -385,19 +385,16 @@ export default {
   font-size: 20px;
   flex-shrink: 0;
 }
-
 .user-avatar {
   background-color: #409EFF;
   color: white;
   margin-left: 10px;
 }
-
 .ai-avatar {
   background-color: #67C23A;
   color: white;
   margin-right: 10px;
 }
-
 .question-bubble,
 .answer-bubble {
   max-width: 70%;
@@ -406,39 +403,32 @@ export default {
   line-height: 1.6;
   word-wrap: break-word;
 }
-
 .question-bubble {
   background-color: #409EFF;
   color: white;
 }
-
 .answer-bubble {
   background-color: white;
   color: #303133;
   border: 1px solid #DCDFE6;
 }
-
 .loading-answer {
   color: #909399;
   font-style: italic;
 }
-
 .answer-content {
   white-space: pre-wrap;
 }
-
 .related-news {
   margin-top: 15px;
   padding-top: 15px;
   border-top: 1px dashed #DCDFE6;
 }
-
 .related-title {
   font-weight: bold;
   margin-bottom: 10px;
   color: #606266;
 }
-
 .related-news-item {
   padding: 8px;
   margin: 5px 0;
@@ -448,12 +438,10 @@ export default {
   transition: all 0.3s;
   font-size: 13px;
 }
-
 .related-news-item:hover {
   background-color: #ecf5ff;
   transform: translateX(5px);
 }
-
 .news-similarity {
   display: inline-block;
   background-color: #E6A23C;
@@ -463,16 +451,13 @@ export default {
   font-size: 11px;
   margin-right: 8px;
 }
-
 .news-title-text {
   color: #409EFF;
 }
-
 .qa-input-area {
   border-top: 1px solid #DCDFE6;
   padding-top: 15px;
 }
-
 .input-actions {
   display: flex;
   justify-content: flex-end;
