@@ -464,48 +464,68 @@ class NewsRecommendAgent:
         """
         reasons = []
 
-        # 1. 基于用户历史行为
+        # 1. 基于查询关键词匹配（优先显示与用户输入直接相关的理由）
+        if intent['keywords'] and score_breakdown['similarity'] > 0.3:
+            matched_keywords = [kw for kw in intent['keywords'] if kw in news_data.get('title', '') or kw in news_data.get('keywords', '')]
+            if matched_keywords:
+                reasons.append(f"包含你搜索的关键词「{', '.join(matched_keywords[:2])}」")
+
+        # 2. 基于用户历史行为和兴趣标签（只有当用户兴趣得分较高时才显示）
         if score_breakdown['user_interest'] > 0.6:
             try:
                 sql = "SELECT tags FROM news_api_user WHERE userid = %s"
                 self.cursor.execute(sql, (user_id,))
                 result = self.cursor.fetchone()
                 if result and result[0]:
-                    matched_tags = set(news_data.get('keywords', '').split(',')) & set(result[0].split(','))
+                    user_tags = set(result[0].split(','))
+                    news_keywords = set(news_data.get('keywords', '').split(',')) if news_data.get('keywords') else set()
+                    matched_tags = user_tags & news_keywords
                     if matched_tags:
+                        # 只显示真正匹配的用户关注标签
                         reasons.append(f"与你关注的「{', '.join(list(matched_tags)[:3])}」话题高度相关")
             except:
                 pass
 
-        # 2. 基于查询关键词匹配
-        if intent['keywords'] and score_breakdown['similarity'] > 0.5:
-            matched_keywords = [kw for kw in intent['keywords'] if kw in news_data.get('title', '') or kw in news_data.get('keywords', '')]
-            if matched_keywords:
-                reasons.append(f"包含你搜索的关键词「{', '.join(matched_keywords[:2])}」")
+        # 3. 基于类别匹配（只有当用户明确请求该类别或用户关注该类别时才显示）
+        category_name = self.get_category_name(news_data.get('category'))
+        if intent['categories'] and category_name in intent['categories']:
+            # 用户明确要求了该类别
+            reasons.append(f"符合你要求的「{category_name}」类别")
+        elif score_breakdown['user_interest'] > 0.7:
+            # 检查该类别是否是用户真正关注的
+            try:
+                sql = "SELECT tags FROM news_api_user WHERE userid = %s"
+                self.cursor.execute(sql, (user_id,))
+                result = self.cursor.fetchone()
+                if result and result[0]:
+                    user_tags = set(result[0].split(','))
+                    # 如果类别名称在用户标签中，说明用户确实关注这个类别
+                    if category_name in user_tags:
+                        reasons.append(f"属于你关注的「{category_name}」类别")
+            except:
+                pass
 
-        # 3. 基于热度
-        if score_breakdown['heat'] > 0.7:
+        # 4. 基于热度（只有真正热门时才显示）
+        if score_breakdown['heat'] > 0.8:
             reasons.append(f"当前热门文章（阅读{news_data.get('readnum', 0)}+）")
 
-        # 4. 基于新鲜度
-        if score_breakdown['freshness'] > 0.8:
+        # 5. 基于新鲜度
+        if score_breakdown['freshness'] > 0.9:
             reasons.append("最新发布")
-        elif score_breakdown['freshness'] > 0.6:
+        elif score_breakdown['freshness'] > 0.7:
             reasons.append("近期更新")
 
-        # 5. 基于类别匹配
-        if intent['categories']:
-            category_name = self.get_category_name(news_data.get('category'))
-            if category_name in intent['categories']:
-                reasons.append(f"属于你关注的「{category_name}」类别")
+        # 6. 基于内容质量（只有高质量内容才显示）
+        if score_breakdown['quality'] > 0.85:
+            content_length = len(news_data.get('mainpage', ''))
+            if content_length > 800:  # 长文才称为深度内容
+                reasons.append("优质深度内容")
+            elif content_length > 300:
+                reasons.append("精选内容")
 
-        # 6. 基于内容质量
-        if score_breakdown['quality'] > 0.8:
-            reasons.append("优质深度内容")
-
-        # 组合推荐理由
+        # 组合推荐理由，最多显示2个理由，避免信息过载
         if reasons:
-            return "；".join(reasons[:3])  # 最多显示3个理由
+            return "；".join(reasons[:2])
         else:
             return "根据你的兴趣推荐"
 

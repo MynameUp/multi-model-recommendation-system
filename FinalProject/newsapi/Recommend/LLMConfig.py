@@ -19,7 +19,7 @@ ENABLE_AUTO_FALLBACK = True
 # ==================== 魔塔社区（ModelScope）配置 ====================
 MODELSCOPE_CONFIG = {
     # API Token（请确保已替换为真实Token）
-    "api_token": "ms-7e6bbbc2-b6d0-485c-b366-45d2a0e5c70b",
+    "api_token": "",
 
     # 可用的对话模型列表（基于魔塔社区模型库截图）
     "models": {

@@ -1,6 +1,6 @@
 <template>
   <div class="intelligent-recommend-container">
-    <HeaderMenu activename="3"></HeaderMenu>
+    <HeaderMenu activename="4"></HeaderMenu>
 
     <!-- 智能对话区域 -->
     <div class="chat-section">

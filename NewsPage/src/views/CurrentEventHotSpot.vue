@@ -1,6 +1,6 @@
 <template>
   <div class="home-main" style="background: url('https://ae01.alicdn.com/kf/Ue1cf333248e943a185ce61da03bde50eS.jpg'); background-attachment: fixed;">
-      <HeaderMenu activename="4"></HeaderMenu>
+      <HeaderMenu activename="5"></HeaderMenu>
     <Row>
       <Col span="4" ></Col>
       <Col span="12" style="height: auto; padding: 10px; cursor: pointer;">
