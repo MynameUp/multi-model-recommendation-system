@@ -1,11 +1,17 @@
 """
-    Desc: 大语言模型接口抽象层 - 仅支持魔塔社区API（OpenAI兼容接口）
+    Desc: 大语言模型接口抽象层 - 支持阿里云百炼和魔塔社区API
     Features:
         - 统一的LLM调用接口
-        - 使用魔塔社区OpenAI兼容接口（最新标准）
+        - 默认使用阿里云百炼API（DashScope）
+        - 支持魔塔社区API（备用方案）
         - 自动降级机制
         - 支持流式输出
         - 原生messages格式支持
+
+    支持的LLM类型：
+        - "dashscope": 阿里云百炼API（默认，推荐）
+        - "modelscope": 魔塔社区API（备用）
+        - "fallback": 降级方案（规则-based）
 """
 import logging
 import requests
@@ -13,10 +19,9 @@ import json
 from abc import ABC, abstractmethod
 from typing import Optional, Generator
 
-from Recommend.LLMConfig import MODELSCOPE_CONFIG
+from Recommend.LLMConfig import MODELSCOPE_CONFIG, DASHSCOPE_CONFIG
 
 logger = logging.getLogger(__name__)
-
 
 class LLMBase(ABC):
     """LLM基类"""
@@ -64,6 +69,217 @@ class LLMBase(ABC):
             逐块生成的文本
         """
         raise NotImplementedError("流式输出未在此LLM中实现")
+
+
+class DashScopeLLM(LLMBase):
+    """
+    阿里云百炼（DashScope）API实现 - 使用OpenAI兼容接口
+
+    阿里云百炼是阿里云提供的大模型服务平台，支持通义千问系列模型。
+
+    优势：
+        - 国内访问稳定，速度快
+        - OpenAI API标准兼容，易于迁移
+        - 通义千问系列模型中文能力强
+        - 支持多种模型（qwen-plus, qwen-max, qwen-turbo等）
+        - 无需本地GPU，无需下载模型
+        - 原生支持messages格式和流式输出
+        - 提供丰富的API功能（联网搜索、函数调用等）
+
+    使用前需要：
+        1. 注册阿里云账号: https://www.aliyun.com/
+        2. 开通百炼服务: https://bailian.console.aliyun.com/
+        3. 创建API-KEY（API-KEY管理 → 创建API-KEY）
+        4. 安装OpenAI SDK: pip install openai
+
+    支持的模型：
+        - qwen-plus（推荐）：平衡性能和成本
+        - qwen-max：最强性能，适合复杂任务
+        - qwen-turbo：速度快，成本低
+        - qwen-long：支持超长上下文（128K）
+    """
+
+    def __init__(self, api_key: str, model_name: str = "qwen-plus"):
+        """
+        初始化阿里云百炼API（OpenAI兼容接口）
+
+        Args:
+            api_key: 阿里云百炼 API Key
+            model_name: 模型名称（如 qwen-plus, qwen-max, qwen-turbo）
+        """
+        try:
+            from openai import OpenAI
+
+            self.api_key = api_key
+            self.model_name = model_name
+            self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+            # 验证API Key是否有效
+            if not api_key or api_key == 'sk-your-dashscope-api-key-here':
+                logger.warning("未提供有效的阿里云百炼API Key，将使用降级方案")
+                raise ValueError("Invalid API key")
+
+            # 初始化OpenAI客户端（使用阿里云百炼的OpenAI兼容接口）
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=self.base_url
+            )
+
+            logger.info(f"阿里云百炼API初始化成功（OpenAI兼容接口）")
+            logger.info(f"使用模型: {model_name}")
+            logger.info(f"API端点: {self.base_url}")
+
+        except ImportError:
+            logger.error("未安装openai库，请运行: pip install openai")
+            raise
+        except Exception as e:
+            logger.error(f"阿里云百炼API初始化失败: {e}")
+            raise
+
+    def generate(self, prompt: str, max_length: int = 1024, temperature: float = 0.7) -> str:
+        """
+        生成文本（兼容旧接口，内部转换为messages格式）
+
+        Args:
+            prompt: 输入提示词
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Returns:
+            生成的文本
+        """
+        try:
+            # 将prompt转换为messages格式
+            messages = [
+                {"role": "user", "content": prompt}
+            ]
+
+            # 调用chat方法
+            return self.chat(messages, max_length, temperature)
+
+        except Exception as e:
+            logger.error(f"阿里云百炼生成失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            return ""
+
+    def chat(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> str:
+        """
+        对话式生成（使用OpenAI兼容接口）
+
+        Args:
+            messages: 消息列表，格式为 [{"role": "user/assistant/system", "content": "..."}]
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Returns:
+            生成的回复
+        """
+        try:
+            logger.info(f"调用阿里云百炼API，模型: {self.model_name}")
+
+            # 第一次尝试
+            response = self._make_api_call(messages, max_length, temperature)
+
+            # 检查响应是否有效
+            if response and len(response.strip()) > 10:
+                logger.info(f"阿里云百炼API调用成功，生成长度: {len(response)}")
+                return response
+
+            # 如果第一次返回空，尝试重试一次
+            logger.warning("第一次调用返回空响应，尝试重试...")
+            response = self._make_api_call(messages, max_length, temperature)
+
+            if response and len(response.strip()) > 10:
+                logger.info(f"重试成功，生成长度: {len(response)}")
+                return response
+
+            logger.error("两次调用都返回空响应")
+            return ""
+
+        except Exception as e:
+            logger.error(f"阿里云百炼对话失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            return ""
+
+    def _make_api_call(self, messages: list, max_length: int, temperature: float) -> str:
+        """执行单次API调用"""
+        try:
+            # 调用OpenAI兼容接口
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_tokens=max_length,
+                temperature=temperature,
+                top_p=0.8,
+                stream=False
+            )
+
+            # 详细记录响应
+            logger.debug(f"API响应对象: {response}")
+            logger.debug(f"Choices: {response.choices}")
+
+            # 提取生成的文本
+            if response.choices and len(response.choices) > 0:
+                choice = response.choices[0]
+                logger.debug(f"Choice: {choice}")
+
+                if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                    generated_text = choice.message.content
+                    if generated_text:
+                        return generated_text
+                    else:
+                        logger.warning("Content字段为空")
+                        return ""
+                else:
+                    logger.error(f"Choice结构异常: {choice}")
+                    return ""
+            else:
+                logger.error("API返回空choices")
+                return ""
+
+        except Exception as e:
+            logger.error(f"API调用异常: {e}")
+            raise
+
+    def chat_stream(self, messages: list, max_length: int = 1024, temperature: float = 0.7) -> Generator[str, None, None]:
+        """
+        流式对话生成（实时输出）
+
+        Args:
+            messages: 消息列表
+            max_length: 最大生成长度
+            temperature: 温度参数
+
+        Yields:
+            逐块生成的文本片段
+        """
+        try:
+            logger.info(f"调用阿里云百炼API（流式），模型: {self.model_name}")
+
+            # 调用流式接口
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_tokens=max_length,
+                temperature=temperature,
+                top_p=0.8,
+                stream=True  # 启用流式模式
+            )
+
+            # 逐块返回生成的文本
+            for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta_content = chunk.choices[0].delta.content
+                    if delta_content:
+                        yield delta_content
+
+        except Exception as e:
+            logger.error(f"阿里云百炼流式对话失败: {e}")
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            yield ""
 
 
 class ModelScopeLLM(LLMBase):
@@ -301,34 +517,44 @@ class FallbackLLM(LLMBase):
         return f"抱歉，当前无法连接到智能模型。关于您的问题：{question[:50]}...，建议您查阅相关新闻原文获取详细信息。"
 
 
-def create_llm(llm_type: str = "modelscope", **kwargs) -> LLMBase:
+def create_llm(llm_type: str = "dashscope", **kwargs) -> LLMBase:
     """
-    工厂函数：创建LLM实例（仅支持魔塔社区）
+    工厂函数：创建LLM实例
 
     Args:
         llm_type: LLM类型
-            - "modelscope": 魔塔社区API（唯一支持的在线LLM，使用OpenAI兼容接口）
+            - "dashscope": 阿里云百炼API（默认，推荐使用）
+            - "modelscope": 魔塔社区API（备用方案）
             - "fallback": 降级方案（规则-based）
 
         **kwargs: 其他参数
-            - api_token: 魔塔社区Token（必填）
-            - model_name: 模型名称（可选，默认 qwen/Qwen-7B-Chat）
+            - api_key: 阿里云百炼API Key（dashscope模式必填）
+            - api_token: 魔塔社区Token（modelscope模式必填）
+            - model_name: 模型名称（可选）
 
     Returns:
         LLM实例
 
     Examples:
-        # 使用魔塔社区（OpenAI兼容接口）
+        # 使用阿里云百炼（推荐）
+        >>> llm = create_llm(
+        ...     llm_type='dashscope',
+        ...     api_key='sk-your-api-key',
+        ...     model_name='qwen-plus'
+        ... )
+
+        # 使用魔塔社区
         >>> llm = create_llm(
         ...     llm_type='modelscope',
         ...     api_token='your_token',
-        ...     model_name='qwen/Qwen-7B-Chat'
+        ...     model_name='ZhipuAI/GLM-5.1'
         ... )
 
         # 使用降级方案
         >>> llm = create_llm(llm_type='fallback')
     """
     llm_registry = {
+        "dashscope": DashScopeLLM,
         "modelscope": ModelScopeLLM,
         "fallback": FallbackLLM
     }
@@ -343,7 +569,10 @@ def create_llm(llm_type: str = "modelscope", **kwargs) -> LLMBase:
         return llm_class(**kwargs)
     except Exception as e:
         logger.error(f"创建LLM实例失败: {e}，使用降级方案")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
         return FallbackLLM()
+
 
 
 def get_qa_params():
@@ -361,7 +590,7 @@ def get_qa_params():
     }
 
 
-def validate_llm_config(llm_type: str = "modelscope") -> dict:
+def validate_llm_config(llm_type: str = "dashscope") -> dict:
     """
     验证LLM配置是否完整
 
@@ -382,27 +611,44 @@ def validate_llm_config(llm_type: str = "modelscope") -> dict:
             'message': '配置有效'
         }
 
-    if llm_type.lower() != "modelscope":
+    if llm_type.lower() == "dashscope":
+        from Recommend.LLMConfig import DASHSCOPE_CONFIG
+        api_key = DASHSCOPE_CONFIG.get('api_key', '')
+
+        if not api_key or api_key == 'sk-your-dashscope-api-key-here':
+            return {
+                'valid': False,
+                'missing_fields': ['api_key'],
+                'message': '缺少阿里云百炼 API Key，请在 LLMConfig.py 中填写'
+            }
+
         return {
-            'valid': False,
+            'valid': True,
             'missing_fields': [],
-            'message': f'不支持的LLM类型: {llm_type}，仅支持 modelscope 和 fallback'
+            'message': '配置有效'
         }
 
-    from Recommend.LLMConfig import MODELSCOPE_CONFIG
+    if llm_type.lower() == "modelscope":
+        from Recommend.LLMConfig import MODELSCOPE_CONFIG
+        api_token = MODELSCOPE_CONFIG.get('api_token', '')
 
-    api_token = MODELSCOPE_CONFIG.get('api_token', '')
+        if not api_token or api_token == 'your_modelscope_token_here':
+            return {
+                'valid': False,
+                'missing_fields': ['api_token'],
+                'message': '缺少魔塔社区 API Token，请在 LLMConfig.py 中填写'
+            }
 
-    if not api_token or api_token == 'your_modelscope_token_here':
         return {
-            'valid': False,
-            'missing_fields': ['api_token'],
-            'message': '缺少魔塔社区 API Token，请在 LLMConfig.py 中填写'
+            'valid': True,
+            'missing_fields': [],
+            'message': '配置有效'
         }
 
     return {
-        'valid': True,
+        'valid': False,
         'missing_fields': [],
-        'message': '配置有效'
+        'message': f'不支持的LLM类型: {llm_type}'
     }
+
 

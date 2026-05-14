@@ -315,7 +315,8 @@ class NewsQAAgent:
         logger.info(f"初始化LLM，类型: {llm_type}")
         self.llm = create_llm(llm_type=llm_type, **llm_kwargs)
 
-    def answer_question(self, user_id: int, news_id: int, question: str) -> Dict:
+    def answer_question(self, user_id: int, news_id: int, question: str,
+                       use_external_knowledge: bool = True) -> Dict:
         """
         回答用户关于新闻的问题
 
@@ -323,18 +324,33 @@ class NewsQAAgent:
             user_id: 用户ID
             news_id: 新闻ID
             question: 用户问题
+            use_external_knowledge: 是否允许使用外部知识（LLM训练数据）
+                                    True - 当数据库信息不足时，使用LLM的外部知识补充
+                                    False - 严格基于数据库中的新闻内容回答
 
         Returns:
-            包含答案和相关新闻的字典
+            包含答案和相关新闻的字典，结构如下：
+            {
+                'answer': '答案文本',
+                'relatedNews': [...],  # 相关新闻列表
+                'answerSource': 'database' | 'external' | 'mixed' | 'fallback'
+            }
+
+            answerSource 说明：
+            - 'database': 答案完全来自数据库中的新闻
+            - 'external': 答案来自LLM的外部知识（数据库中无相关信息）
+            - 'mixed': 答案结合了数据库内容和外部知识
+            - 'fallback': 使用了降级方案（规则生成）
         """
-        logger.info(f"问答请求 - 用户:{user_id}, 新闻:{news_id}, 问题:{question}")
+        logger.info(f"问答请求 - 用户:{user_id}, 新闻:{news_id}, 问题:{question}, 外部知识:{use_external_knowledge}")
 
         # 1. 获取当前新闻详情
         current_news = self.vector_store.get_news_detail(news_id)
         if not current_news:
             return {
                 'answer': '抱歉，找不到这篇新闻的详细信息。',
-                'relatedNews': []
+                'relatedNews': [],
+                'answerSource': 'none'
             }
 
         # 2. 检索相关新闻（基于问题语义）
@@ -346,8 +362,11 @@ class NewsQAAgent:
         # 4. 构建上下文
         context = self._build_context(current_news, related_news_list[:3])
 
-        # 5. 使用魔塔社区LLM生成答案
-        answer = self._generate_answer_with_llm(question, context, current_news)
+        # 5. 使用魔塔社区LLM生成答案（支持外部知识）
+        answer, answer_source = self._generate_answer_with_llm(
+            question, context, current_news,
+            use_external_knowledge=use_external_knowledge
+        )
 
         # 6. 获取相关新闻的详细信息
         related_news_details = []
@@ -367,11 +386,13 @@ class NewsQAAgent:
 
         result = {
             'answer': answer,
-            'relatedNews': related_news_details
+            'relatedNews': related_news_details,
+            'answerSource': answer_source  # 标注答案来源
         }
 
-        logger.info(f"问答完成 - 返回 {len(related_news_details)} 条相关新闻")
+        logger.info(f"问答完成 - 返回 {len(related_news_details)} 条相关新闻, 来源: {answer_source}")
         return result
+
 
     def _build_context(self, current_news: Dict, related_news: List[Dict]) -> str:
         """
@@ -414,20 +435,30 @@ class NewsQAAgent:
 
         return "\n".join(context_parts)
 
-    def _generate_answer_with_llm(self, question: str, context: str, current_news: Dict) -> str:
+    def _generate_answer_with_llm(self, question: str, context: str, current_news: Dict,
+                                 use_external_knowledge: bool = True) -> tuple:
         """
         使用魔塔社区LLM生成问题答案
 
         Args:
             question: 用户问题
-            context: 上下文信息
-            current_news: 当前新闻
+            context: 上下文信息（包含当前新闻和相关文章）
+            current_news: 当前新闻详情
+            use_external_knowledge: 是否允许使用外部知识
+                                    True - LLM可以结合自己的训练知识回答
+                                    False - 严格基于context中的新闻内容
 
         Returns:
-            生成的答案
+            元组 (answer, answer_source)：
+            - answer: 生成的答案文本
+            - answer_source: 答案来源标识
+                * 'database' - 答案来自数据库新闻
+                * 'external' - 答案来自LLM外部知识
+                * 'mixed' - 混合来源
+                * 'fallback' - 降级方案
         """
-        # 构建Prompt
-        prompt = self._build_prompt(question, context, current_news)
+        # 构建Prompt（根据是否允许外部知识选择不同的模板）
+        prompt = self._build_prompt(question, context, current_news, use_external_knowledge)
 
         try:
             # 调用LLM生成答案
@@ -439,32 +470,75 @@ class NewsQAAgent:
             )
 
             if answer and len(answer.strip()) > 10:
-                return answer.strip()
+                # 检测答案来源标识
+                answer_source = self._detect_answer_source(answer, context)
+                logger.info(f"LLM生成成功，答案来源: {answer_source}, 长度: {len(answer)}")
+                return answer.strip(), answer_source
             else:
                 logger.warning("LLM返回答案过短，使用规则生成")
-                return self._generate_answer_by_rules(question, context, current_news)
+                fallback_answer = self._generate_answer_by_rules(question, context, current_news)
+                return fallback_answer, 'fallback'
 
         except Exception as e:
             logger.error(f"LLM生成答案失败: {e}，降级到规则生成")
-            return self._generate_answer_by_rules(question, context, current_news)
+            import traceback
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            fallback_answer = self._generate_answer_by_rules(question, context, current_news)
+            return fallback_answer, 'fallback'
 
-    def _build_prompt(self, question: str, context: str, current_news: Dict) -> str:
+
+    def _build_prompt(self, question: str, context: str, current_news: Dict,
+                     use_external_knowledge: bool = True) -> str:
         """
         构建LLM提示词
 
         Args:
             question: 用户问题
-            context: 上下文
-            current_news: 当前新闻
+            context: 上下文（包含当前新闻和相关文章的详细信息）
+            current_news: 当前新闻详情
+            use_external_knowledge: 是否允许使用外部知识
 
         Returns:
             提示词字符串
-        """
-        prompt_template = """你是一个专业的新闻问答助手。请根据提供的新闻内容，准确、简洁地回答用户的问题。
 
-【要求】
-1. 答案必须基于提供的新闻内容，不要编造信息
-2. 如果新闻中没有相关信息，请明确说明
+        Prompt设计思路：
+        - 当允许外部知识时：采用"双源模式"，让LLM能够灵活结合新闻内容和自身知识
+        - 当不允许外部知识时：采用"严格模式"，确保答案完全可追溯至数据库
+        """
+        if use_external_knowledge:
+            # 双源模式：允许结合新闻内容和外部知识
+            prompt_template = """你是一个专业的新闻问答助手，拥有丰富的知识库。请根据以下信息回答用户问题：
+
+【重要说明】
+1. 优先基于提供的【新闻内容】回答问题
+2. 如果新闻内容中没有相关信息，可以使用你的【外部知识】补充回答
+3. 必须在回答开头明确标注答案来源：
+   - 如果答案主要来自新闻内容，标注为"[基于新闻]"
+   - 如果答案主要来自你的知识库，标注为"[基于通用知识]"
+   - 如果两者结合，标注为"[综合回答]"
+
+【回答要求】
+1. 答案要准确、简洁、客观中立
+2. 控制在300字以内
+3. 使用中文回答
+4. 如果新闻内容与你的知识有冲突，以新闻内容为准
+5. 如果完全无法回答，请说明原因
+
+【新闻内容】
+{context}
+
+【用户问题】
+{question}
+
+【你的回答】（请先标注来源，再给出答案）
+"""
+        else:
+            # 严格模式：仅基于新闻内容
+            prompt_template = """你是一个专业的新闻问答助手。请严格基于提供的新闻内容，准确、简洁地回答用户的问题。
+
+【严格要求】
+1. 答案必须完全基于提供的新闻内容，不要使用任何外部知识
+2. 如果新闻中没有相关信息，请明确说明"新闻中未提及此信息"
 3. 答案要简洁明了，控制在200字以内
 4. 使用中文回答
 5. 保持客观中立的态度
@@ -483,7 +557,53 @@ class NewsQAAgent:
             question=question
         )
 
+        logger.debug(f"Prompt构建完成，长度: {len(prompt)}, 模式: {'双源' if use_external_knowledge else '严格'}")
         return prompt
+
+    def _detect_answer_source(self, answer: str, context: str) -> str:
+        """
+        检测答案来源
+
+        Args:
+            answer: LLM生成的答案文本
+            context: 原始上下文（用于辅助判断）
+
+        Returns:
+            答案来源标识字符串：
+            - 'database': 答案来自数据库新闻
+            - 'external': 答案来自LLM外部知识
+            - 'mixed': 混合来源
+
+        检测逻辑：
+        1. 首先检查答案中是否包含明确的来源标记（由LLM按Prompt要求添加）
+        2. 如果没有标记，则通过关键词匹配进行推断
+        3. 默认情况下认为来自数据库（保守策略）
+        """
+        # 检查答案中是否包含来源标识（由LLM按Prompt要求添加）
+        if "[基于新闻]" in answer or "基于新闻" in answer:
+            return 'database'
+        elif "[基于通用知识]" in answer or "基于通用知识" in answer or "外部知识" in answer:
+            return 'external'
+        elif "[综合回答]" in answer or "综合" in answer:
+            return 'mixed'
+        else:
+            # 如果没有明确标记，尝试通过关键词推断
+            # 如果答案中包含"新闻中提到"、"根据报道"等词汇，可能来自数据库
+            database_indicators = ["新闻中提到", "根据报道", "文中指出", "该新闻"]
+            external_indicators = ["一般来说", "通常情况下", "据了解", "历史上"]
+
+            db_score = sum(1 for indicator in database_indicators if indicator in answer)
+            ext_score = sum(1 for indicator in external_indicators if indicator in answer)
+
+            if db_score > ext_score:
+                return 'database'
+            elif ext_score > db_score:
+                return 'external'
+            else:
+                # 无法判断时，默认认为来自数据库（保守策略）
+                return 'database'
+
+
 
     def _generate_answer_by_rules(self, question: str, context: str, current_news: Dict) -> str:
         """
@@ -523,14 +643,68 @@ class NewsQAAgent:
 
 
 def beginNewsQA(user_id: int, news_id: int, question: str,
-                llm_type: str = "modelscope",
+                llm_type: str = "dashscope",
+                use_external_knowledge: bool = True,
                 **llm_kwargs) -> Dict:
     """
-    新闻问答入口函数（仅使用魔塔社区API）
+    新闻问答入口函数
 
     Args:
         user_id: 用户ID
         news_id: 新闻ID
+        question: 用户问题
+        llm_type: LLM类型（默认dashscope，即阿里云百炼）
+                  - "dashscope": 阿里云百炼API（默认，推荐）
+                  - "modelscope": 魔塔社区API（备用）
+                  - "fallback": 降级方案
+        use_external_knowledge: 是否允许使用外部知识（默认True）
+        **llm_kwargs: LLM初始化参数
+            - api_key: 阿里云百炼API Key（dashscope模式）
+            - api_token: 魔塔社区Token（modelscope模式）
+            - model_name: 模型名称（可选）
+
+    Returns:
+        问答结果字典
+
+    使用示例：
+        # 使用阿里云百炼（默认）
+        >>> result = beginNewsQA(
+        ...     user_id=100001,
+        ...     news_id=12345,
+        ...     question="阿森纳是谁？"
+        ... )
+
+        # 使用魔塔社区
+        >>> result = beginNewsQA(
+        ...     user_id=100001,
+        ...     news_id=12345,
+        ...     question="阿森纳是谁？",
+        ...     llm_type="modelscope",
+        ...     api_token="your_modelscope_token"
+        ... )
+    """
+    agent = NewsQAAgent(llm_type=llm_type, **llm_kwargs)
+    try:
+        result = agent.answer_question(
+            user_id, news_id, question,
+            use_external_knowledge=use_external_knowledge
+        )
+        return result
+    finally:
+        agent.close()
+
+
+def global_knowledge_qa(question: str, llm_type: str = "modelscope", **llm_kwargs) -> str:
+    """
+    基于LLM全局知识的问答（不依赖数据库）
+
+    适用场景：
+    - 用户询问与具体新闻无关的通用问题
+    - 需要了解背景知识、历史事件、概念解释等
+    - 数据库中没有相关内容的查询
+    - 需要提供额外上下文信息的场景
+
+    Args:
         question: 用户问题
         llm_type: LLM类型（modelscope 或 fallback）
         **llm_kwargs: LLM初始化参数
@@ -538,14 +712,64 @@ def beginNewsQA(user_id: int, news_id: int, question: str,
             - model_name: 模型名称（可选）
 
     Returns:
-        问答结果字典
+        答案字符串
+
+    使用示例：
+        >>> from Recommend.NewsQAAgent import global_knowledge_qa
+        >>> answer = global_knowledge_qa(
+        ...     question="什么是人工智能？",
+        ...     llm_type="modelscope",
+        ...     api_token="your_token"
+        ... )
+        >>> print(answer)
+
+        >>> # 询问历史背景
+        >>> answer = global_knowledge_qa(
+        ...     question="请介绍一下中美贸易摩擦的历史背景"
+        ... )
     """
-    agent = NewsQAAgent(llm_type=llm_type, **llm_kwargs)
+    logger.info(f"全局知识问答 - 问题: {question}")
+
     try:
-        result = agent.answer_question(user_id, news_id, question)
-        return result
-    finally:
-        agent.close()
+        # 创建LLM实例
+        llm = create_llm(llm_type=llm_type, **llm_kwargs)
+
+        # 构建Prompt
+        prompt = f"""你是一个专业的新闻和知识问答助手。请回答用户的以下问题：
+
+【要求】
+1. 提供准确、客观、有用的信息
+2. 如果不确定，请诚实说明
+3. 控制在300字以内
+4. 使用中文回答
+5. 保持专业和中立的态度
+6. 如果涉及多个方面，请条理清晰地分点说明
+
+【用户问题】
+{question}
+
+【你的回答】
+"""
+
+        # 生成答案
+        qa_params = get_qa_params()
+        answer = llm.generate(
+            prompt=prompt,
+            max_length=qa_params['max_length'],
+            temperature=qa_params['temperature']
+        )
+
+        logger.info("全局知识问答完成")
+        return answer.strip() if answer else "抱歉，暂时无法回答这个问题。"
+
+    except Exception as e:
+        logger.error(f"全局知识问答失败: {e}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
+        return "抱歉，服务暂时不可用，请稍后重试。"
+
+
+# ... existing code ...
 
 
 def initNewsVectors(batch_size: int = 100) -> int:

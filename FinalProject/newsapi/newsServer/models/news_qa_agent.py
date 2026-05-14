@@ -31,11 +31,12 @@ logger = logging.getLogger(__name__)
 @require_http_methods(["POST"])
 def news_qa(request):
     """
-    新闻问答接口（仅支持魔塔社区API）
+    新闻问答接口（默认使用阿里云百炼，支持魔塔社区备用）
 
     功能说明：
         接收用户关于某篇新闻的问题，使用RAG技术检索相关新闻，
-        并通过魔塔社区LLM生成智能回答，同时返回相关新闻列表。
+        并通过阿里云百炼LLM生成智能回答，同时返回相关新闻列表。
+        如果阿里云百炼不可用，自动降级到魔塔社区或fallback。
 
     请求方法：
         POST
@@ -45,8 +46,8 @@ def news_qa(request):
             "userId": 1,                    # 必填：用户ID
             "newsId": 10086,                # 必填：新闻ID
             "question": "这篇新闻讲了什么？",  # 必填：用户问题
-            "llmType": "modelscope",        # 可选：固定为 modelscope
-            "apiToken": "ms-xxx"            # 可选：魔塔社区Token（如果后端未配置）
+            "llmType": "dashscope",         # 可选：dashscope（默认）/ modelscope / fallback
+            "apiKey": "sk-xxx"              # 可选：API Key（如果后端未配置）
         }
 
     返回结果（JSON格式）：
@@ -56,7 +57,8 @@ def news_qa(request):
             "message": "Success",
             "data": {
                 "answer": "这篇新闻主要讨论了...",
-                "relatedNews": [...]
+                "relatedNews": [...],
+                "answerSource": "database"  # 答案来源标识
             }
         }
     """
@@ -69,11 +71,17 @@ def news_qa(request):
         news_id = data.get('newsId')
         question = data.get('question', '').strip()
 
-        # 强制使用魔塔社区，忽略前端传入的llmType
-        llm_type = 'modelscope'
+        # 默认使用阿里云百炼（dashscope），也支持前端传入llmType
+        llm_type = data.get('llmType', 'dashscope').lower()
+
+        # 验证llmType是否合法
+        if llm_type not in ['dashscope', 'modelscope', 'fallback']:
+            logger.warning(f"不支持的LLM类型: {llm_type}，使用默认值 dashscope")
+            llm_type = 'dashscope'
 
         # 提取可选参数
-        api_token = data.get('apiToken', '')
+        api_key = data.get('apiKey', '')
+        api_token = data.get('apiToken', '')  # 兼容旧的参数名
 
         # 参数验证
         if not user_id or not news_id or not question:
@@ -84,22 +92,61 @@ def news_qa(request):
             }, status=400)
 
         # 记录请求日志
-        logger.info(f"收到问答请求 - 用户:{user_id}, 新闻:{news_id}, LLM:魔塔社区, 问题:{question[:50]}...")
-
-        # 从配置文件获取Token（优先）或使用前端传入的Token
-        from Recommend.LLMConfig import MODELSCOPE_CONFIG
-        if not api_token or api_token == 'your_modelscope_token_here':
-            api_token = MODELSCOPE_CONFIG.get('api_token', '')
+        logger.info(f"收到问答请求 - 用户:{user_id}, 新闻:{news_id}, LLM:{llm_type}, 问题:{question[:50]}...")
 
         # 构建LLM配置参数
         llm_kwargs = {}
-        if api_token and api_token != 'your_modelscope_token_here':
-            llm_kwargs['api_token'] = api_token
-            llm_kwargs['model_name'] = MODELSCOPE_CONFIG.get('default_model', 'qwen/Qwen-7B-Chat')
-            logger.info(f"使用魔塔社区API调用LLM")
-        else:
-            logger.warning("未配置魔塔社区Token，将使用降级方案")
-            llm_type = 'fallback'
+
+        if llm_type == 'dashscope':
+            # 阿里云百炼配置
+            from Recommend.LLMConfig import DASHSCOPE_CONFIG
+
+            # 优先使用前端传入的apiKey，其次使用配置文件中的
+            if api_key and api_key.startswith('sk-'):
+                final_api_key = api_key
+                logger.info(f"使用前端传入的阿里云百炼API Key")
+            else:
+                final_api_key = DASHSCOPE_CONFIG.get('api_key', '')
+                logger.info(f"使用配置文件中的阿里云百炼API Key")
+
+            # 详细的调试日志
+            logger.info(f"API Key调试信息:")
+            logger.info(f"  - final_api_key值: {final_api_key[:10] if len(final_api_key) > 10 else final_api_key}...")
+            logger.info(f"  - final_api_key长度: {len(final_api_key)}")
+            logger.info(f"  - 非空检查: {bool(final_api_key)}")
+            logger.info(f"  - 非占位符检查: {final_api_key != 'sk-your-dashscope-api-key-here'}")
+            logger.info(f"  - 完整比较: '{final_api_key}' != 'sk-your-dashscope-api-key-here' = {final_api_key != 'sk-your-dashscope-api-key-here'}")
+
+            if final_api_key and final_api_key != 'sk-your-dashscope-api-key-here':
+                llm_kwargs['api_key'] = final_api_key
+                llm_kwargs['model_name'] = DASHSCOPE_CONFIG.get('default_model', 'qwen3-vl-235b-a22b-thinking')
+                logger.info(f"使用阿里云百炼API调用LLM，模型: {llm_kwargs['model_name']}")
+            else:
+                logger.warning("阿里云百炼API Key验证失败，尝试降级到魔塔社区")
+                logger.warning(f"   失败原因: final_api_key={final_api_key}")
+                # 尝试降级到魔塔社区
+                llm_type = 'modelscope'
+
+        if llm_type == 'modelscope':
+            # 魔塔社区配置
+            from Recommend.LLMConfig import MODELSCOPE_CONFIG
+
+            # 优先使用前端传入的apiToken，其次使用配置文件中的
+            if api_token and api_token != 'your_modelscope_token_here':
+                final_api_token = api_token
+                logger.info(f"使用前端传入的魔塔社区Token")
+            else:
+                final_api_token = MODELSCOPE_CONFIG.get('api_token', '')
+                logger.info(f"使用配置文件中的魔塔社区Token")
+
+            if final_api_token and final_api_token != 'your_modelscope_token_here':
+                llm_kwargs['api_token'] = final_api_token
+                llm_kwargs['model_name'] = MODELSCOPE_CONFIG.get('default_model', 'ZhipuAI/GLM-5.1')
+                logger.info(f"使用魔塔社区API调用LLM，模型: {llm_kwargs['model_name']}")
+            else:
+                logger.warning("未配置魔塔社区Token，将使用降级方案")
+                llm_type = 'fallback'
+
 
         # 调用问答智能体生成答案
         result = beginNewsQA(
@@ -111,7 +158,9 @@ def news_qa(request):
         )
 
         # 记录响应日志
-        logger.info(f"问答完成 - 返回{len(result.get('relatedNews', []))}条相关新闻")
+        related_count = len(result.get('relatedNews', []))
+        answer_source = result.get('answerSource', 'unknown')
+        logger.info(f"问答完成 - 返回{related_count}条相关新闻, 答案来源: {answer_source}")
 
         # 返回成功响应
         return JsonResponse({
@@ -144,6 +193,7 @@ def news_qa(request):
             "message": f"服务器错误: {str(e)}",
             "error_type": type(e).__name__,
         }, status=500)
+
 
 
 @csrf_exempt

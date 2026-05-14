@@ -116,13 +116,16 @@ class NewsRecommendAgent:
             dict: 包含解析结果的字典
         """
         intent = {
-            'keywords': [],           # 关键词列表
-            'categories': [],         # 新闻类别
-            'time_range': None,       # 时间范围（天数）
-            'exclude_categories': [], # 排除的类别
-            'require_fresh': False,   # 是否要求最新
+            'keywords': [],  # 关键词列表
+            'categories': [],  # 新闻类别
+            'time_range': None,  # 时间范围（天数）
+            'exclude_categories': [],  # 排除的类别
+            'require_fresh': False,  # 是否要求最新
             'query_type': 'general',  # 查询类型：general/similar/history
-            'original_input': user_input
+            'original_input': user_input,
+            'topic_keywords': [],  # 用户明确提到的主题关键词（如"人工智能"）
+            'category_request': False,  # 是否明确要求某类别
+            'primary_topic': None  # 主要搜索主题（用于推荐理由）
         }
 
         # 转换为小写（处理英文）
@@ -143,13 +146,65 @@ class NewsRecommendAgent:
                 intent['require_fresh'] = True
                 break
 
-        # 2. 识别新闻类别
-        for category, keywords in self.category_map.items():
-            for keyword in keywords:
-                if keyword in user_input or keyword.lower() in text_lower:
+        # 2. 识别新闻类别和主题关键词
+        # 定义明确的类别指示词（只有包含这些词才认为是类别请求）
+        explicit_category_indicators = ['类别', '分类', '栏目', '板块']
+        category_type_keywords = {
+            '科技': ['科技新闻', '科技类', '科技方面'],
+            '财经': ['财经新闻', '财经类', '经济方面'],
+            '国际': ['国际新闻', '国际类', '国际方面'],
+            '国内': ['国内新闻', '国内类', '国内方面'],
+            '娱乐': ['娱乐新闻', '娱乐类', '娱乐方面'],
+            '体育': ['体育新闻', '体育类', '体育方面'],
+            '军事': ['军事新闻', '军事类', '军事方面'],
+            '股市': ['股市行情', '股市类'],
+            '美股': ['美股行情', '美股类'],
+        }
+
+        # 先检查是否是明确的类别请求
+        for category, indicators in category_type_keywords.items():
+            for indicator in indicators:
+                if indicator in user_input:
                     if category not in intent['categories']:
                         intent['categories'].append(category)
+                        intent['category_request'] = True
                     break
+
+        # 如果没有明确类别指示，再检查类别映射中的词
+        # 但要区分是类别请求还是主题关键词
+        topic_to_category = {}  # 记录主题词到类别的映射
+
+        for category, keywords in self.category_map.items():
+            for keyword in keywords:
+                # 跳过数字ID
+                if keyword.isdigit():
+                    continue
+
+                # 检查是否在用户输入中
+                if keyword in user_input or keyword.lower() in text_lower:
+                    # 特殊处理：像"人工智能"、"AI"、"芯片"这些是主题关键词，不是类别
+                    # 只有"科技"、"财经"等明确的类别词才算类别请求
+                    if keyword in ['科技', '财经', '国际', '国内', '娱乐', '体育', '军事', '股市', '美股']:
+                        # 这是类别词
+                        if category not in intent['categories']:
+                            intent['categories'].append(category)
+                            intent['category_request'] = True
+                    else:
+                        # 这是主题关键词（如"人工智能"、"AI"、"芯片"）
+                        if keyword not in intent['topic_keywords']:
+                            intent['topic_keywords'].append(keyword)
+                        # 同时添加到关键词列表
+                        if keyword not in intent['keywords']:
+                            intent['keywords'].append(keyword)
+                        # 记录主题词到类别的映射
+                        topic_to_category[keyword] = category
+                    break
+
+        # 设置主要搜索主题（第一个主题关键词或类别）
+        if intent['topic_keywords']:
+            intent['primary_topic'] = intent['topic_keywords'][0]
+        elif intent['categories']:
+            intent['primary_topic'] = intent['categories'][0]
 
         # 3. 识别排除类别（"不要XXX"）
         exclude_pattern = r'不要(.+?)(?:新闻|内容|文章)?(?:，|,|。|$)'
@@ -175,10 +230,14 @@ class NewsRecommendAgent:
                 if isinstance(kw, str) and len(kw) <= 4:
                     category_words.add(kw)
 
-        # 额外过滤掉无意义的动词和助词
+        # 额外过滤掉无意义的动词和助词，但保留主题关键词
+        for kw in intent['topic_keywords']:
+            if kw in meaningful_words and kw not in intent['keywords']:
+                intent['keywords'].append(kw)
+
+        # 清理关键词列表
         intent['keywords'] = [w for w in meaningful_words
-                             if w not in category_words
-                             and w not in ['新闻', '推荐', '看', '想', '给我', '要', '希望']]
+                              if w not in ['新闻', '推荐', '看', '想', '给我', '要', '希望', '有关', '相关']]
 
         # 5. 识别特殊查询类型
         if '换一批' in user_input or '换一些' in user_input:
@@ -191,15 +250,15 @@ class NewsRecommendAgent:
         logger.info(f"用户意图解析结果: {intent}")
         return intent
 
-
-    def calculate_similarity_score(self, news_keywords, query_keywords, user_tags):
+    def calculate_similarity_score(self, news_keywords, query_keywords, user_tags, intent=None):
         """
-        计算新闻与查询/用户兴趣的相似度
+        计算新闻与查询/用户兴趣的相似度（优化版）
 
         Args:
             news_keywords: 新闻关键词列表
             query_keywords: 查询关键词列表
             user_tags: 用户标签列表
+            intent: 用户意图信息（可选）
 
         Returns:
             float: 相似度分数 (0-1)
@@ -211,15 +270,34 @@ class NewsRecommendAgent:
         query_set = set(query_keywords) if query_keywords else set()
         user_set = set(user_tags) if user_tags else set()
 
-        # 计算与查询关键词的相似度
-        query_sim = 0.0
-        if query_set and news_set:
-            intersection = len(news_set & query_set)
-            union = len(news_set | query_set)
-            if union > 0:
-                query_sim = intersection / union
+        # 扩展查询关键词：添加相关词汇
+        expanded_query_set = set(query_set)
+        if intent:
+            expanded_query_set.update(self.expand_keywords_with_related(query_set, intent))
 
-        # 计算与用户标签的相似度
+        # 1. 计算与查询关键词的相似度（优化版）
+        query_sim = 0.0
+        if expanded_query_set and news_set:
+            # 精确匹配得分
+            exact_match = len(news_set & expanded_query_set)
+
+            # 部分匹配得分（检查新闻标题中是否包含查询词）
+            partial_match_score = 0.0
+            if intent and 'original_input' in intent:
+                for query_word in expanded_query_set:
+                    if query_word in intent['original_input']:
+                        # 检查是否在新闻标题中出现
+                        # 这个需要在调用时传入新闻标题，这里暂时跳过
+                        pass
+
+            # 使用改进的Jaccard相似度
+            if exact_match > 0:
+                # 如果有关键词匹配，给予基础分
+                base_score = exact_match / len(expanded_query_set)
+                # 归一化
+                query_sim = min(base_score * 1.5, 1.0)  # 乘以1.5提高匹配词的权重
+
+        # 2. 计算与用户标签的相似度
         user_sim = 0.0
         if user_set and news_set:
             intersection = len(news_set & user_set)
@@ -227,9 +305,9 @@ class NewsRecommendAgent:
             if union > 0:
                 user_sim = intersection / union
 
-        # 综合相似度（查询关键词权重更高）
+        # 3. 综合相似度（查询关键词权重更高）
         if query_keywords and user_tags:
-            similarity = 0.6 * query_sim + 0.4 * user_sim
+            similarity = 0.7 * query_sim + 0.3 * user_sim
         elif query_keywords:
             similarity = query_sim
         elif user_tags:
@@ -238,6 +316,130 @@ class NewsRecommendAgent:
             similarity = 0.0
 
         return min(similarity, 1.0)
+
+    def expand_keywords_with_related(self, query_keywords, intent):
+        """
+        扩展查询关键词：添加相关词汇
+
+        Args:
+            query_keywords: 原始查询关键词
+            intent: 用户意图
+
+        Returns:
+            set: 扩展后的关键词集合
+        """
+        related_keywords = set()
+
+        # 定义常见主题的相关词汇
+        topic_relations = {
+            '财经': ['股票', '基金', '投资', '期货', '黄金', '银行', '经济', '金融', '股市', '理财'],
+            '科技': ['人工智能', 'AI', '芯片', '互联网', '数码', '软件', '技术', '创新', '5G', '区块链'],
+            '国际': ['外交', '联合国', '世界', '全球', '国际关系', '条约', '国际组织'],
+            '国内': ['中国', '社会', '民生', '政策', '改革', '发展'],
+            '娱乐': ['明星', '电影', '音乐', '电视剧', '综艺', '演员', '歌手'],
+            '体育': ['足球', '篮球', '运动', '比赛', '奥运会', '运动员', '赛事'],
+            '军事': ['国防', '军队', '武器', '军事演习', '军事装备', '军事战略'],
+            '股市': ['A股', '港股', '美股', '股票', '股市行情', '交易', '涨跌'],
+            '美股': ['NASDAQ', 'NYSE', '美国股市', '华尔街', '美股行情'],
+        }
+
+        # 根据查询词添加相关词汇
+        for query_word in query_keywords:
+            # 如果查询词是某个主题，添加该主题的相关词汇
+            for topic, related_list in topic_relations.items():
+                if query_word == topic or query_word in self.category_map.get(topic, []):
+                    related_keywords.update(related_list)
+                    break
+
+        return related_keywords
+
+    def generate_recommendation_reason(self, news_data, intent, user_id, score_breakdown):
+        """
+        生成推荐理由
+
+        Args:
+            news_data: 新闻数据
+            intent: 用户意图
+            user_id: 用户ID
+            score_breakdown: 各维度得分详情
+
+        Returns:
+            str: 推荐理由文本
+        """
+        reasons = []
+
+        # 1. 基于用户主要搜索意图（主题词或类别）
+        if intent['primary_topic']:
+            topic = intent['primary_topic']
+
+            # 如果是类别请求（如"财经"、"科技"）
+            if intent['category_request'] and topic in self.category_map:
+                # 检查新闻类别是否匹配用户请求的类别
+                news_category_id = news_data.get('category')
+                # 获取用户请求类别对应的ID
+                requested_category_ids = []
+                if topic in self.category_map:
+                    requested_category_ids.append(self.category_map[topic][0])
+
+                # 检查新闻的类别ID是否匹配
+                if str(news_category_id) in requested_category_ids:
+                    reasons.append(f"符合你要求的「{topic}」新闻")
+                else:
+                    # 类别不匹配但被推荐，说明有其他高分因素
+                    reasons.append(f"与「{topic}」相关的新闻")
+
+            # 如果是主题关键词（如"人工智能"、"芯片"）
+            elif topic in news_data.get('title', '') or topic in news_data.get('keywords', '') or topic in news_data.get('mainpage', ''):
+                reasons.append(f"符合你要求的「{topic}」新闻")
+            else:
+                # 主题词不在新闻中，但相似度较高
+                reasons.append(f"与「{topic}」相关的新闻")
+
+        # 2. 基于查询关键词匹配（如果没有主题词）
+        elif intent['keywords'] and score_breakdown['similarity'] > 0.2:
+            matched_keywords = [kw for kw in intent['keywords'] if kw in news_data.get('title', '') or kw in news_data.get('keywords', '')]
+            if matched_keywords:
+                reasons.append(f"包含你搜索的关键词「{', '.join(matched_keywords[:2])}」")
+
+        # 3. 基于用户历史行为和兴趣标签（只有当用户兴趣得分较高时才显示）
+        if score_breakdown['user_interest'] > 0.6:
+            try:
+                sql = "SELECT tags FROM news_api_user WHERE userid = %s"
+                self.cursor.execute(sql, (user_id,))
+                result = self.cursor.fetchone()
+                if result and result[0]:
+                    user_tags = set(result[0].split(','))
+                    news_keywords = set(news_data.get('keywords', '').split(',')) if news_data.get('keywords') else set()
+                    matched_tags = user_tags & news_keywords
+                    if matched_tags and not any('主题相关' in r or '关键词' in r or '新闻' in r for r in reasons):
+                        # 只显示真正匹配的用户关注标签
+                        reasons.append(f"与你关注的「{', '.join(list(matched_tags)[:2])}」话题相关")
+            except:
+                pass
+
+        # 4. 基于内容质量（只有高质量内容才显示，调整阈值）
+        if score_breakdown['quality'] > 0.85:
+            content_length = len(news_data.get('mainpage', ''))
+            if content_length > 1000:  # 更长文才称为深度内容
+                reasons.append("优质深度长文")
+            elif content_length > 600:
+                reasons.append("内容详实")
+
+        # 5. 基于热度（只有真正热门时才显示）
+        if score_breakdown['heat'] > 0.8:
+            reasons.append(f"热门文章（{news_data.get('readnum', 0)}阅读）")
+
+        # 6. 基于新鲜度
+        if score_breakdown['freshness'] > 0.85:
+            reasons.append("最新发布")
+        elif score_breakdown['freshness'] > 0.7:
+            reasons.append("近期更新")
+
+        # 组合推荐理由，最多显示2个理由，避免信息过载
+        if reasons:
+            return "；".join(reasons[:2])
+        else:
+            return "综合推荐"
 
     def calculate_heat_score(self, readnum, comments):
         """
@@ -464,14 +666,41 @@ class NewsRecommendAgent:
         """
         reasons = []
 
-        # 1. 基于查询关键词匹配（优先显示与用户输入直接相关的理由）
-        if intent['keywords'] and score_breakdown['similarity'] > 0.3:
+        # 1. 基于用户主要搜索意图（主题词或类别）
+        if intent['primary_topic']:
+            topic = intent['primary_topic']
+
+            # 如果是类别请求（如"财经"、"科技"）
+            if intent['category_request'] and topic in self.category_map:
+                # 检查新闻类别是否匹配用户请求的类别
+                news_category_id = news_data.get('category')
+                # 获取用户请求类别对应的ID
+                requested_category_ids = []
+                if topic in self.category_map:
+                    requested_category_ids.append(self.category_map[topic][0])
+
+                # 检查新闻的类别ID是否匹配
+                if str(news_category_id) in requested_category_ids:
+                    reasons.append(f"符合你要求的「{topic}」新闻")
+                else:
+                    # 类别不匹配但被推荐，说明有其他高分因素
+                    reasons.append(f"与「{topic}」相关的新闻")
+
+            # 如果是主题关键词（如"人工智能"、"芯片"）
+            elif topic in news_data.get('title', '') or topic in news_data.get('keywords', '') or topic in news_data.get('mainpage', ''):
+                reasons.append(f"符合你要求的「{topic}」新闻")
+            else:
+                # 主题词不在新闻中，但相似度较高
+                reasons.append(f"与「{topic}」相关的新闻")
+
+        # 2. 基于查询关键词匹配（如果没有主题词）
+        elif intent['keywords'] and score_breakdown['similarity'] > 0.3:
             matched_keywords = [kw for kw in intent['keywords'] if kw in news_data.get('title', '') or kw in news_data.get('keywords', '')]
             if matched_keywords:
                 reasons.append(f"包含你搜索的关键词「{', '.join(matched_keywords[:2])}」")
 
-        # 2. 基于用户历史行为和兴趣标签（只有当用户兴趣得分较高时才显示）
-        if score_breakdown['user_interest'] > 0.6:
+        # 3. 基于用户历史行为和兴趣标签（只有当用户兴趣得分较高时才显示）
+        if score_breakdown['user_interest'] > 0.7:
             try:
                 sql = "SELECT tags FROM news_api_user WHERE userid = %s"
                 self.cursor.execute(sql, (user_id,))
@@ -480,54 +709,35 @@ class NewsRecommendAgent:
                     user_tags = set(result[0].split(','))
                     news_keywords = set(news_data.get('keywords', '').split(',')) if news_data.get('keywords') else set()
                     matched_tags = user_tags & news_keywords
-                    if matched_tags:
+                    if matched_tags and not any('主题相关' in r or '关键词' in r or '新闻' in r for r in reasons):
                         # 只显示真正匹配的用户关注标签
-                        reasons.append(f"与你关注的「{', '.join(list(matched_tags)[:3])}」话题高度相关")
+                        reasons.append(f"与你关注的「{', '.join(list(matched_tags)[:2])}」话题相关")
             except:
                 pass
 
-        # 3. 基于类别匹配（只有当用户明确请求该类别或用户关注该类别时才显示）
-        category_name = self.get_category_name(news_data.get('category'))
-        if intent['categories'] and category_name in intent['categories']:
-            # 用户明确要求了该类别
-            reasons.append(f"符合你要求的「{category_name}」类别")
-        elif score_breakdown['user_interest'] > 0.7:
-            # 检查该类别是否是用户真正关注的
-            try:
-                sql = "SELECT tags FROM news_api_user WHERE userid = %s"
-                self.cursor.execute(sql, (user_id,))
-                result = self.cursor.fetchone()
-                if result and result[0]:
-                    user_tags = set(result[0].split(','))
-                    # 如果类别名称在用户标签中，说明用户确实关注这个类别
-                    if category_name in user_tags:
-                        reasons.append(f"属于你关注的「{category_name}」类别")
-            except:
-                pass
+        # 4. 基于内容质量（只有高质量内容才显示，调整阈值）
+        if score_breakdown['quality'] > 0.9:
+            content_length = len(news_data.get('mainpage', ''))
+            if content_length > 1000:  # 更长文才称为深度内容
+                reasons.append("优质深度长文")
+            elif content_length > 600:
+                reasons.append("内容详实")
 
-        # 4. 基于热度（只有真正热门时才显示）
-        if score_breakdown['heat'] > 0.8:
-            reasons.append(f"当前热门文章（阅读{news_data.get('readnum', 0)}+）")
+        # 5. 基于热度（只有真正热门时才显示）
+        if score_breakdown['heat'] > 0.85:
+            reasons.append(f"热门文章（{news_data.get('readnum', 0)}阅读）")
 
-        # 5. 基于新鲜度
+        # 6. 基于新鲜度
         if score_breakdown['freshness'] > 0.9:
             reasons.append("最新发布")
-        elif score_breakdown['freshness'] > 0.7:
+        elif score_breakdown['freshness'] > 0.75:
             reasons.append("近期更新")
-
-        # 6. 基于内容质量（只有高质量内容才显示）
-        if score_breakdown['quality'] > 0.85:
-            content_length = len(news_data.get('mainpage', ''))
-            if content_length > 800:  # 长文才称为深度内容
-                reasons.append("优质深度内容")
-            elif content_length > 300:
-                reasons.append("精选内容")
 
         # 组合推荐理由，最多显示2个理由，避免信息过载
         if reasons:
             return "；".join(reasons[:2])
         else:
-            return "根据你的兴趣推荐"
+            return "综合推荐"
 
     def get_category_name(self, category_id):
         """根据类别ID获取类别名称"""
@@ -632,7 +842,7 @@ class NewsRecommendAgent:
             params.extend(history_ids[:100])
 
         # 按时间排序
-        base_sql += " ORDER BY nd.date DESC LIMIT 200"
+        base_sql += " ORDER BY nd.date DESC LIMIT 300"  # 增加查询数量，后续用评分筛选
 
         # 4. 执行查询
         try:
@@ -660,7 +870,8 @@ class NewsRecommendAgent:
             except:
                 user_tags = []
 
-            similarity_score = self.calculate_similarity_score(all_keywords, intent['keywords'], user_tags)
+            # 计算相似度时传入intent参数
+            similarity_score = self.calculate_similarity_score(all_keywords, intent['keywords'], user_tags, intent)
             heat_score = self.calculate_heat_score(news.get('readnum', 0), news.get('comments', 0))
             freshness_score = self.calculate_freshness_score(news.get('date', ''))
             user_interest_score = self.calculate_user_interest_score(news.get('category'), user_id, all_keywords)
@@ -671,14 +882,17 @@ class NewsRecommendAgent:
             )
             repetition_penalty = self.calculate_repetition_penalty(user_id, news['news_id'], history_ids)
 
-            # 综合评分公式
+            # 根据用户意图动态调整权重
+            dynamic_weights = self.calculate_dynamic_weights(intent)
+
+            # 综合评分公式（使用动态权重）
             final_score = (
-                self.weights['similarity'] * similarity_score +
-                self.weights['heat'] * heat_score +
-                self.weights['freshness'] * freshness_score +
-                self.weights['user_interest'] * user_interest_score +
-                self.weights['quality'] * quality_score -
-                self.weights['repetition_penalty'] * repetition_penalty
+                dynamic_weights['similarity'] * similarity_score +
+                dynamic_weights['heat'] * heat_score +
+                dynamic_weights['freshness'] * freshness_score +
+                dynamic_weights['user_interest'] * user_interest_score +
+                dynamic_weights['quality'] * quality_score -
+                dynamic_weights['repetition_penalty'] * repetition_penalty
             )
 
             # 确保分数在0-1之间
@@ -707,12 +921,61 @@ class NewsRecommendAgent:
         # 6. 按综合得分排序
         scored_news.sort(key=lambda x: x['score'], reverse=True)
 
-        # 7. 返回Top-N推荐
-        recommendations = scored_news[:top_n]
+        # 7. 过滤掉分数过低的结果
+        min_score_threshold = 0.1  # 最低分数阈值
+        filtered_news = [item for item in scored_news if item['score'] >= min_score_threshold]
+
+        # 8. 返回Top-N推荐
+        recommendations = filtered_news[:top_n]
 
         logger.info(f"智能推荐完成 - 返回 {len(recommendations)} 条结果")
 
         return recommendations
+
+    def calculate_dynamic_weights(self, intent):
+        """
+        根据用户意图动态调整评分权重
+
+        Args:
+            intent: 用户意图
+
+        Returns:
+            dict: 动态权重配置
+        """
+        # 默认权重
+        weights = {
+            'similarity': 0.30,
+            'heat': 0.20,
+            'freshness': 0.25,
+            'user_interest': 0.15,
+            'quality': 0.10,
+            'repetition_penalty': 0.15
+        }
+
+        # 如果用户明确要求某类别，增加相似度权重
+        if intent['category_request']:
+            weights['similarity'] = 0.40
+            weights['heat'] = 0.15
+            weights['freshness'] = 0.20
+
+        # 如果用户要求最新新闻，增加新鲜度权重
+        if intent['require_fresh']:
+            weights['freshness'] = 0.40
+            weights['similarity'] = 0.25
+            weights['heat'] = 0.15
+
+        # 如果用户根据历史推荐，增加用户兴趣权重
+        if intent['query_type'] == 'history':
+            weights['user_interest'] = 0.35
+            weights['similarity'] = 0.25
+            weights['freshness'] = 0.20
+
+        # 确保权重总和为1.0
+        total = sum(weights.values())
+        for key in weights:
+            weights[key] /= total
+
+        return weights
 
     def close(self):
         """关闭数据库连接"""
