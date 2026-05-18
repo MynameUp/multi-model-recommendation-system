@@ -108,7 +108,7 @@ class NewsVectorStore:
             # 强行触发拟合
             self.embedding_model.tfidf_vectorizer.fit(corpus)
             self.embedding_model.is_fitted = True
-            logger.info("✅ [系统核心修复] TF-IDF 成功完成全局预建，特征维度已永久锁死为 384！")
+            logger.info("[系统核心修复] TF-IDF 成功完成全局预建，特征维度已永久锁死为 384！")
         except Exception as e:
             logger.error(f"⚠️ TF-IDF 全局预建失败: {e}")
         # ==================================================================

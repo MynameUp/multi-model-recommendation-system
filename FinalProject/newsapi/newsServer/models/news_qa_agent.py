@@ -94,14 +94,32 @@ def news_qa(request):
         # 记录请求日志
         logger.info(f"收到问答请求 - 用户:{user_id}, 新闻:{news_id}, LLM:{llm_type}, 问题:{question[:50]}...")
 
-        # 构建LLM配置参数
+        # ==================== ✨ [核心重构] LLM 路由分配器 ====================
+        # 先在最上方初始化一个外部知识开关，默认开启
+        use_ext_knowledge = True 
         llm_kwargs = {}
 
-        if llm_type == 'dashscope':
-            # 阿里云百炼配置
+        if llm_type == 'fallback':
+            logger.info("🚀 [快速模式路由] 检测到前端触发快速问答，正在执行极速去 RAG 降维优化...")
+            from Recommend.LLMConfig import DASHSCOPE_CONFIG
+            
+            final_api_key = api_key if (api_key and api_key.startswith('sk-')) else DASHSCOPE_CONFIG.get('api_key', '')
+
+            if final_api_key and final_api_key != 'sk-your-dashscope-api-key-here':
+                llm_kwargs['api_key'] = final_api_key
+                # ⚡ 优化点 1：更换为百炼旗下速度最快、专门用于快速摘要的 qwen-turbo
+                llm_kwargs['model_name'] = 'qwen-turbo'  
+                # ⚡ 优化点 2：强行关闭外部知识库检索！只读当前单篇新闻，减少 6000+ token 的废话
+                use_ext_knowledge = False              
+                llm_type = 'dashscope'                  
+                logger.info(f" 极速模式配置成功！模型: {llm_kwargs['model_name']}, 已关闭外部知识检索。")
+            else:
+                logger.warning(" 未检测到有效的百炼 API Key，快速模式被迫保持本地纯规则降级")
+
+        elif llm_type == 'dashscope':
+            # 阿里云百炼配置（智能核心问答模式 - 使用重型推理大模型）
             from Recommend.LLMConfig import DASHSCOPE_CONFIG
 
-            # 优先使用前端传入的apiKey，其次使用配置文件中的
             if api_key and api_key.startswith('sk-'):
                 final_api_key = api_key
                 logger.info(f"使用前端传入的阿里云百炼API Key")
@@ -109,29 +127,19 @@ def news_qa(request):
                 final_api_key = DASHSCOPE_CONFIG.get('api_key', '')
                 logger.info(f"使用配置文件中的阿里云百炼API Key")
 
-            # 详细的调试日志
-            logger.info(f"API Key调试信息:")
-            logger.info(f"  - final_api_key值: {final_api_key[:10] if len(final_api_key) > 10 else final_api_key}...")
-            logger.info(f"  - final_api_key长度: {len(final_api_key)}")
-            logger.info(f"  - 非空检查: {bool(final_api_key)}")
-            logger.info(f"  - 非占位符检查: {final_api_key != 'sk-your-dashscope-api-key-here'}")
-            logger.info(f"  - 完整比较: '{final_api_key}' != 'sk-your-dashscope-api-key-here' = {final_api_key != 'sk-your-dashscope-api-key-here'}")
-
             if final_api_key and final_api_key != 'sk-your-dashscope-api-key-here':
                 llm_kwargs['api_key'] = final_api_key
+                # 智能模式保持使用高级多模态/思考模型
                 llm_kwargs['model_name'] = DASHSCOPE_CONFIG.get('default_model', 'qwen3-vl-235b-a22b-thinking')
                 logger.info(f"使用阿里云百炼API调用LLM，模型: {llm_kwargs['model_name']}")
             else:
                 logger.warning("阿里云百炼API Key验证失败，尝试降级到魔塔社区")
-                logger.warning(f"   失败原因: final_api_key={final_api_key}")
-                # 尝试降级到魔塔社区
                 llm_type = 'modelscope'
 
-        if llm_type == 'modelscope':
-            # 魔塔社区配置
+        elif llm_type == 'modelscope':
+            # 魔塔社区配置（备用渠道）
             from Recommend.LLMConfig import MODELSCOPE_CONFIG
 
-            # 优先使用前端传入的apiToken，其次使用配置文件中的
             if api_token and api_token != 'your_modelscope_token_here':
                 final_api_token = api_token
                 logger.info(f"使用前端传入的魔塔社区Token")
@@ -146,17 +154,17 @@ def news_qa(request):
             else:
                 logger.warning("未配置魔塔社区Token，将使用降级方案")
                 llm_type = 'fallback'
+        # =====================================================================
 
-
-        # 调用问答智能体生成答案
+        # 调用问答智能体生成答案（确保传入了 use_ext_knowledge 开关）
         result = beginNewsQA(
             user_id=int(user_id),
             news_id=int(news_id),
             question=question,
             llm_type=llm_type,
+            use_external_knowledge=use_ext_knowledge, # ⭐ 确保这一行传入了我们刚刚调整的开关
             **llm_kwargs
         )
-
         # 记录响应日志
         related_count = len(result.get('relatedNews', []))
         answer_source = result.get('answerSource', 'unknown')
