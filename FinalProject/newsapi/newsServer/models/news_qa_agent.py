@@ -100,19 +100,19 @@ def news_qa(request):
         llm_kwargs = {}
 
         if llm_type == 'fallback':
-            logger.info("🚀 [快速模式路由] 检测到前端触发快速问答，正在执行极速去 RAG 降维优化...")
+            logger.info("🚀 [快速模式路由] 拦截并定向至极速推理模型 deepseek-r1-distill-qwen-7b...")
             from Recommend.LLMConfig import DASHSCOPE_CONFIG
             
             final_api_key = api_key if (api_key and api_key.startswith('sk-')) else DASHSCOPE_CONFIG.get('api_key', '')
 
             if final_api_key and final_api_key != 'sk-your-dashscope-api-key-here':
                 llm_kwargs['api_key'] = final_api_key
-                # ⚡ 优化点 1：更换为百炼旗下速度最快、专门用于快速摘要的 qwen-turbo
-                llm_kwargs['model_name'] = 'qwen-turbo'  
-                # ⚡ 优化点 2：强行关闭外部知识库检索！只读当前单篇新闻，减少 6000+ token 的废话
+                # ⚡ 升级点 1：使用轻量级推理模型，智商飙升且保持低延迟
+                llm_kwargs['model_name'] = 'deepseek-r1-distill-qwen-7b'  
+                # ⚡ 升级点 2：依然保持关闭外部 RAG，只读当前单篇新闻
                 use_ext_knowledge = False              
                 llm_type = 'dashscope'                  
-                logger.info(f" 极速模式配置成功！模型: {llm_kwargs['model_name']}, 已关闭外部知识检索。")
+                logger.info(f" 极速模式配置成功！模型: {llm_kwargs['model_name']}")
             else:
                 logger.warning(" 未检测到有效的百炼 API Key，快速模式被迫保持本地纯规则降级")
 

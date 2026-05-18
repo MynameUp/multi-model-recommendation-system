@@ -510,7 +510,7 @@ class NewsQAAgent:
 
 
     def _build_prompt(self, question: str, context: str, current_news: Dict,
-                     use_external_knowledge: bool = True) -> str:
+                      use_external_knowledge: bool = True) -> str:
         """
         构建LLM提示词
 
@@ -522,13 +522,9 @@ class NewsQAAgent:
 
         Returns:
             提示词字符串
-
-        Prompt设计思路：
-        - 当允许外部知识时：采用"双源模式"，让LLM能够灵活结合新闻内容和自身知识
-        - 当不允许外部知识时：采用"严格模式"，确保答案完全可追溯至数据库
         """
         if use_external_knowledge:
-            # 双源模式：允许结合新闻内容和外部知识
+            # 双源模式：允许结合新闻内容和外部知识（用于重型智能推理）
             prompt_template = """你是一个专业的新闻问答助手，拥有丰富的知识库。请根据以下信息回答用户问题：
 
 【重要说明】
@@ -555,15 +551,23 @@ class NewsQAAgent:
 【你的回答】（请先标注来源，再给出答案）
 """
         else:
-            # 严格模式：仅基于新闻内容
-            prompt_template = """你是一个专业的新闻问答助手。请严格基于提供的新闻内容，准确、简洁地回答用户的问题。
+            # ⚡ 极速模式核心优化 1：物理抛弃外层传进来的沉重 context（包含那5篇废话新闻）
+            # 纯手工只提取当前这唯一的一篇新闻，把几千字的 Token 直接打骨折！
+            title = current_news.get('title', '未知标题')
+            # 兼容不同数据库字段名（content 或 mainpage）
+            content = current_news.get('content', current_news.get('mainpage', '')) 
+            
+            clean_context = f"【当前重点新闻】\n标题: {title}\n正文: {content}"
+            context = clean_context  # 偷梁换柱，用干净的上下文替换掉臃肿的上下文
 
-【严格要求】
-1. 答案必须完全基于提供的新闻内容，不要使用任何外部知识
-2. 如果新闻中没有相关信息，请明确说明"新闻中未提及此信息"
-3. 答案要简洁明了，控制在200字以内
-4. 使用中文回答
-5. 保持客观中立的态度
+            # ⚡ 极速模式核心优化 2：给 DeepSeek 念紧箍咒，暴力压制它的废话思考时间
+            prompt_template = """你是一个专门负责快速摘要的极速新闻助手。请严格基于提供的单篇新闻，用最快的速度回答用户问题。
+
+【极速与严格要求】
+1. 答案必须完全基于提供的新闻内容，不要发散。
+2. 如果新闻中没有相关信息，请直接回答"新闻中未提及此信息"。
+3. 答案要极简明了，一语中的，控制在150字以内。
+4. ⚠️【特别指令】禁止进行漫长的深度思考！如果你的底层含有思维链（Chain-of-Thought）机制，请跳过或极度压缩思考过程（<think>标签内不得超过30字），立刻直接输出最终答案！
 
 【新闻内容】
 {context}
@@ -571,7 +575,7 @@ class NewsQAAgent:
 【用户问题】
 {question}
 
-【你的回答】
+【你的最终回答】
 """
 
         prompt = prompt_template.format(
@@ -579,7 +583,7 @@ class NewsQAAgent:
             question=question
         )
 
-        logger.debug(f"Prompt构建完成，长度: {len(prompt)}, 模式: {'双源' if use_external_knowledge else '严格'}")
+        logger.info(f"Prompt构建完成，长度: {len(prompt)} 字符, 模式: {'双源智能' if use_external_knowledge else '去RAG极速'}")
         return prompt
 
     def _detect_answer_source(self, answer: str, context: str) -> str:
