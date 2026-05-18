@@ -19,7 +19,7 @@ ENABLE_AUTO_FALLBACK = True
 DASHSCOPE_CONFIG = {
     # API Key（阿里云百炼）
     # 获取方式：https://bailian.console.aliyun.com/ → API-KEY管理
-    "api_key": "",
+    "api_key": "sk-9ff50721101548e3aac9e06497a5438e",
 
     # 可用的对话模型列表
     "models": {

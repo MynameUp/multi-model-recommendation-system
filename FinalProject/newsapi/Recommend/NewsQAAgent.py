@@ -94,6 +94,25 @@ class NewsVectorStore:
         self.cursor = self.db.cursor()
         self.embedding_model = NewsQAEmbedding()
 
+        # ====== ✨ 注入核心工业级 Trick：全局预拟合，彻底锁死 384 维度 ======
+        try:
+            self.cursor.execute("SELECT title, mainpage FROM news_api_newsdetail LIMIT 300")
+            rows = self.cursor.fetchall()
+            # 拼接基础语料
+            corpus = [f"{r[0]} {r[1][:300]}" for r in rows if r[0] or r[1]]
+            
+            # 💡 核心大招：塞入 384 个绝不重复的虚拟 Token，确保总词汇量必超 384
+            dummy_tokens = [f"__dummy_lock_dim_{i}__" for i in range(384)]
+            corpus.extend(dummy_tokens)
+            
+            # 强行触发拟合
+            self.embedding_model.tfidf_vectorizer.fit(corpus)
+            self.embedding_model.is_fitted = True
+            logger.info("✅ [系统核心修复] TF-IDF 成功完成全局预建，特征维度已永久锁死为 384！")
+        except Exception as e:
+            logger.error(f"⚠️ TF-IDF 全局预建失败: {e}")
+        # ==================================================================
+
         # FAISS索引（内存中）
         self.faiss_index = None
         self.news_id_mapping = []  # 映射FAISS索引到news_id
@@ -190,12 +209,14 @@ class NewsVectorStore:
                     SET vector_data = %s, updated_at = NOW() 
                     WHERE news_id = %s
                 """
-                self.cursor.execute(update_sql, (vector_json, news_id))
+                # 💡 UPDATE 语句先给 vector_data 赋值，再传 news_id 条件
+                self.cursor.execute(update_sql, (vector_json, news_id)) 
             else:
                 insert_sql = """
                     INSERT INTO news_api_newsvector (news_id, vector_data, created_at, updated_at) 
                     VALUES (%s, %s, NOW(), NOW())
                 """
+                # 💡 再次确认为 (news_id, vector_json)，千万不要写反了
                 self.cursor.execute(insert_sql, (news_id, vector_json))
 
             self.db.commit()
@@ -209,6 +230,7 @@ class NewsVectorStore:
             return True
 
         except Exception as e:
+            # 💡 恢复为正常的日志记录，删掉 sys.exit(0)，让循环能够顺畅地处理完所有新闻
             logger.error(f"为新闻{news_id}构建向量失败: {e}")
             self.db.rollback()
             return False
@@ -694,41 +716,16 @@ def beginNewsQA(user_id: int, news_id: int, question: str,
         agent.close()
 
 
-def global_knowledge_qa(question: str, llm_type: str = "modelscope", **llm_kwargs) -> str:
+def global_knowledge_qa(question: str, llm_type: str = "dashscope", **llm_kwargs) -> str:
     """
-    基于LLM全局知识的问答（不依赖数据库）
-
-    适用场景：
-    - 用户询问与具体新闻无关的通用问题
-    - 需要了解背景知识、历史事件、概念解释等
-    - 数据库中没有相关内容的查询
-    - 需要提供额外上下文信息的场景
-
-    Args:
-        question: 用户问题
-        llm_type: LLM类型（modelscope 或 fallback）
-        **llm_kwargs: LLM初始化参数
-            - api_token: 魔塔社区Token（必填）
-            - model_name: 模型名称（可选）
-
-    Returns:
-        答案字符串
-
-    使用示例：
-        >>> from Recommend.NewsQAAgent import global_knowledge_qa
-        >>> answer = global_knowledge_qa(
-        ...     question="什么是人工智能？",
-        ...     llm_type="modelscope",
-        ...     api_token="your_token"
-        ... )
-        >>> print(answer)
-
-        >>> # 询问历史背景
-        >>> answer = global_knowledge_qa(
-        ...     question="请介绍一下中美贸易摩擦的历史背景"
-        ... )
+    基于LLM全局知识的问答（不依赖数据库）- 快速模式改造版
     """
-    logger.info(f"全局知识问答 - 问题: {question}")
+    # 💡 方案A核心拦截逻辑：
+    # 强制将快速问答路由到 dashscope（百炼），并指定使用高性价比的 qwen-plus 模型
+    llm_type = "dashscope"
+    llm_kwargs["model_name"] = "qwen-plus"
+
+    logger.info(f"🚀 触发快速模式问答 - 问题: {question}, 通道: {llm_type}, 模型: {llm_kwargs['model_name']}")
 
     try:
         # 创建LLM实例
@@ -759,11 +756,11 @@ def global_knowledge_qa(question: str, llm_type: str = "modelscope", **llm_kwarg
             temperature=qa_params['temperature']
         )
 
-        logger.info("全局知识问答完成")
+        logger.info("✅ 快速模式问答完成")
         return answer.strip() if answer else "抱歉，暂时无法回答这个问题。"
 
     except Exception as e:
-        logger.error(f"全局知识问答失败: {e}")
+        logger.error(f"❌ 快速模式问答失败: {e}")
         import traceback
         logger.error(f"详细错误: {traceback.format_exc()}")
         return "抱歉，服务暂时不可用，请稍后重试。"
