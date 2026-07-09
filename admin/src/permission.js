@@ -23,7 +23,8 @@ router.beforeEach(async (to, from, next) => {
                 // 动态添加路由
                 router.addRoutes(routes)
                 hasMenus = true
-                next({ path: to.path || '/' })
+                // 根路径直接跳转控制中心(/home), 避免静态redirect导致首次白屏
+                next({ path: to.path === '/' ? '/home' : to.path, replace: true })
             } catch (error) {
                 resetTokenAndClearUser()
                 next(`/login?redirect=${to.path}`)

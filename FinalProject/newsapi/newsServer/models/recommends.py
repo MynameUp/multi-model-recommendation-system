@@ -23,7 +23,7 @@ def beginRecommend(request):
         t = threading.Thread(target=beginRecommendSystem, kwargs={'time': time})
         t.setDaemon(True)
         t.start()
-        spiderstate.objects.filter(spiderid=3).update(status=1, interval=oritime)
+        spiderstate.objects.update_or_create(spiderid=3, defaults={"status": 1, "interval": oritime})
         return JsonResponse({"status": "200", 'message': 'Success.'})
     return JsonResponse({"status": "200", 'message': 'Fail.'})
 
@@ -40,7 +40,7 @@ def beginAnalysis(request):
         t = threading.Thread(target=beginAnalysisSystem, kwargs={'time': time})
         t.setDaemon(True)
         t.start()
-        spiderstate.objects.filter(spiderid=4).update(status=1, interval=oritime)
+        spiderstate.objects.update_or_create(spiderid=4, defaults={"status": 1, "interval": oritime})
         return JsonResponse({"status": "200", 'message': 'Success.'})
     return JsonResponse({"status": "200", 'message': 'Fail.'})
 
@@ -53,10 +53,10 @@ def closeRecommendThread(request):
     if request.method == "GET":
         servename = request.GET.get('servename')
         if servename == 'recommend':
-            spiderstate.objects.filter(spiderid=3).update(status=0, interval='')
+            spiderstate.objects.update_or_create(spiderid=3, defaults={"status": 0, "interval": ""})
             stopRecommendSystem()
         elif servename == 'analysis':
-            spiderstate.objects.filter(spiderid=4).update(status=0, interval='')
+            spiderstate.objects.update_or_create(spiderid=4, defaults={"status": 0, "interval": ""})
             stopAnalysisSystem()
         # getpidandkill(servename)
         return JsonResponse({"status": "200", 'message': 'Success.'})

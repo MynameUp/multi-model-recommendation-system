@@ -29,6 +29,7 @@ from newsServer.models.download import download
 from newsServer.models.recommends import beginRecommend, closeRecommendThread, beginAnalysis, getRecommendPageData
 from newsServer.models.intelligent_agent import intelligent_recommend
 from newsServer.models.news_qa_agent import news_qa, init_vectors, vectorization_status, user_qa_history, news_qa_stats, cleanup_qa_data
+from newsServer.models.deepseek_agent_view import deepseek_chat, deepseek_profile, deepseek_hybrid_recommend, deepseek_clear_memory, deepseek_hybrid_recommend_stream
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -88,4 +89,10 @@ urlpatterns = [
     path('agent/user-qa-history/', user_qa_history),
     path('agent/news-qa-stats/', news_qa_stats),
     path('agent/cleanup-qa-data/', cleanup_qa_data),
+    # === DeepSeek 推荐智能体 ===
+    path('agent/deepseek/chat/', deepseek_chat),
+    path('agent/deepseek/profile/', deepseek_profile),
+    path('agent/deepseek/hybrid/', deepseek_hybrid_recommend),
+    path('agent/deepseek/clear/', deepseek_clear_memory),
+    path('agent/deepseek/hybrid/stream/', deepseek_hybrid_recommend_stream),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT) # ⬅️ 必须加这句

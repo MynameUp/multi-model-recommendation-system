@@ -276,21 +276,23 @@ export default {
       // 从sessionStorage获取用户ID（与登录时存储的位置一致）
       const userId = sessionStorage.getItem('userId')
       if (userId) {
-        return parseInt(userId)
+        const parsed = parseInt(userId)
+        if (!isNaN(parsed)) return parsed  // 防止 'kcsciso' 等非数字污染
       }
 
       // 兼容旧版本：尝试从localStorage获取user对象
       try {
         const user = JSON.parse(localStorage.getItem('user') || '{}')
         if (user.userid || user.id) {
-          return parseInt(user.userid || user.id)
+          const parsed = parseInt(user.userid || user.id)
+          if (!isNaN(parsed)) return parsed
         }
       } catch (e) {
         console.warn('[News QA] 解析用户信息失败:', e)
       }
 
-      // 如果都没有，返回1作为默认值
-      return 1
+      // 兜底: 游客ID
+      return 100000
     }
   }
 }

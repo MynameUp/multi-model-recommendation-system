@@ -21,7 +21,7 @@ def beginUrlSpider(request):
         t = threading.Thread(target=begincollect, kwargs={'time': time})
         t.setDaemon(True)
         t.start()
-        spiderstate.objects.filter(spiderid=1).update(status=1, interval=oritime)
+        spiderstate.objects.update_or_create(spiderid=1, defaults={"status": 1, "interval": oritime})
         return JsonResponse({"status": "200", 'message': 'Success.'})
     return JsonResponse({"status": "200", 'message': 'Fail.'})
 
@@ -39,26 +39,33 @@ def beginDetailSpider(request):
         t.setDaemon(True)
         t.start()
         # begindetailcollect(time)
-        spiderstate.objects.filter(spiderid=2).update(status=1, interval=oritime)
+        spiderstate.objects.update_or_create(spiderid=2, defaults={"status": 1, "interval": oritime})
         return JsonResponse({"status": "200", 'message': 'Success.'})
     return JsonResponse({"status": "200", 'message': 'Fail.'})
 
 
 def closeSpiderThread(request):
-    '''
-        @Description：关闭爬虫系统
-        @:param None
-    '''
+    """
+        @Description: 关闭爬虫系统 (防御性版本, 自动清理浏览器残留进程)
+    """
     if request.method == "GET":
-        servename = request.GET.get('servename')
-        if servename == 'url':
-            spiderstate.objects.filter(spiderid=1).update(status=0, interval='')
-            NewsUrlSpider.endsched()
-        elif servename == 'detail':
-            spiderstate.objects.filter(spiderid=2).update(status=0, interval='')
-            NewsDetailSpider.endsched()
-        # getpidandkill(servename)
-        return JsonResponse({"status": "200", 'message': 'Success.'})
+        servename = request.GET.get('servename', '')
+        try:
+            if servename == 'url':
+                spiderstate.objects.update_or_create(spiderid=1, defaults={"status": 0, "interval": ""})
+                NewsUrlSpider.endsched()
+            elif servename == 'detail':
+                spiderstate.objects.update_or_create(spiderid=2, defaults={"status": 0, "interval": ""})
+                NewsDetailSpider.endsched()
+        except Exception as e:
+            import logging
+            logging.getLogger("Spider").warning(f"关闭爬虫调度器异常: {e}")
+        # 强制清理残留浏览器驱动进程 (解决弹窗问题)
+        import os as _os
+        if _os.name == 'nt':
+            _os.system('taskkill /im chromedriver.exe /f /t 2>nul')
+            _os.system('taskkill /im msedgedriver.exe /f /t 2>nul')
+        return JsonResponse({"status": "200", 'message': '已关闭'})
     return JsonResponse({"status": "200", 'message': 'Fail.'})
 
 

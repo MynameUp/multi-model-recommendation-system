@@ -172,4 +172,136 @@ export function uploadAvatarFile(formData) {
   return request.post('api/user/updateheadpic/', formData)
 }
 
+// ========== DeepSeek 推荐智能体 API ==========
+
+/**
+ * 混合流水线推荐 (Intent→Recall→Rank→Explain)
+ * @param {number|string} userid - 用户ID
+ * @param {string} userQuery - 用户自然语言输入
+ * @param {number} topK - 返回数量 (默认20)
+ */
+export function deepseekHybridRecommend(userid, userQuery, topK = 20) {
+  return request.post('api/agent/deepseek/hybrid/', {
+    userid: userid,
+    user_query: userQuery,
+    top_k: topK,
+  })
+}
+
+/**
+ * 混合流水线推荐 — SSE 流式版本 (打字机效果)
+ *
+ * 使用 fetch + ReadableStream 逐行解析后端 StreamingHttpResponse。
+ * 每行是一个 JSON 对象:
+ *   {"type":"phase1","intent":{...},"recommendations":[...],...}
+ *   {"type":"text","content":"chunk..."}
+ *   {"type":"done","total":N}
+ *
+ * @param {number|string} userid - 用户ID
+ * @param {string} userQuery - 用户自然语言输入
+ * @param {number} topK - 返回数量
+ * @param {object} callbacks - 回调函数集合
+ * @param {function} callbacks.onPhase1 - 收到结构化数据时调用
+ * @param {function} callbacks.onText - 收到文本块时调用
+ * @param {function} callbacks.onDone - 流结束时调用
+ * @param {function} callbacks.onError - 出错时调用
+ * @returns {AbortController} 用于取消请求
+ */
+export function deepseekHybridRecommendStream(userid, userQuery, topK, callbacks) {
+  const controller = new AbortController();
+  const baseURL = window.location.origin;
+
+  fetch(`${baseURL}/api/agent/deepseek/hybrid/stream/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userid: String(userid),
+      user_query: userQuery,
+      top_k: topK || 20,
+    }),
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const errText = await response.text();
+        callbacks.onError(new Error(`HTTP ${response.status}: ${errText}`));
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      try {
+        let isDone = false;
+        while (!isDone) {
+          const { done, value } = await reader.read();
+          isDone = done;
+          if (isDone) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          // 按行分割 JSON
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';  // 保留不完整的最后一行
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+
+            try {
+              const msg = JSON.parse(trimmed);
+              switch (msg.type) {
+                case 'start':
+                  callbacks.onStart && callbacks.onStart(msg);
+                  break;
+                case 'status':
+                  callbacks.onStatus && callbacks.onStatus(msg);
+                  break;
+                case 'phase1':
+                  callbacks.onPhase1(msg);
+                  break;
+                case 'text':
+                  callbacks.onText(msg.content);
+                  break;
+                case 'done':
+                  callbacks.onDone(msg);
+                  break;
+              }
+            } catch (parseErr) {
+              // 非 JSON 行 (如空行/注释), 静默跳过
+            }
+          }
+        }
+        // 处理缓冲区残留
+        if (buffer.trim()) {
+          try {
+            const msg = JSON.parse(buffer.trim());
+            if (msg.type === 'done') callbacks.onDone(msg);
+          } catch (e) { /* ignore */ }
+        }
+      } catch (streamErr) {
+        if (streamErr.name !== 'AbortError') {
+          callbacks.onError(streamErr);
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') {
+        callbacks.onError(err);
+      }
+    });
+
+  return controller;
+}
+
+/**
+ * 一键清空对话记忆
+ * @param {number|string} userid - 用户ID
+ */
+export function clearDeepseekMemory(userid) {
+  return request.post('api/agent/deepseek/clear/', {
+    userid: userid,
+  })
+}
+
 

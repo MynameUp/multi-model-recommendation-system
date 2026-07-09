@@ -7,6 +7,16 @@ from django.http import JsonResponse
 from news_api.models import newsdetail, recommend, newshot, newssimilar, history, user, givelike, comments
 
 
+def safe_userid(raw_value, default=100000):
+    """防御性 userid 解析: 非数字/None → 默认游客ID 100000"""
+    if raw_value is None or raw_value == '':
+        return default
+    try:
+        return int(raw_value)
+    except (ValueError, TypeError):
+        return default
+
+
 def all_news(request):
     '''
         @Description：获取所有新闻
@@ -43,7 +53,7 @@ def reconewsbytags(request):
         @:param userid---用户id
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         # 💡 优化：提取 ID 列表，不再循环中查询数据库
         news_ids = recommend.objects.filter(userid=userid, headread=0).values_list('newsid', flat=True)
         
@@ -141,7 +151,7 @@ def getNewsDetailByNewsid(request):
     '''
     if request.method == "GET":
         newsid = request.GET.get('newsid')
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         
         # 💡 使用 F() 对象实现原子性自增
         newsdetail.objects.filter(news_id=newsid).update(readnum=F('readnum') + 1)
@@ -150,23 +160,25 @@ def getNewsDetailByNewsid(request):
             return JsonResponse({"status": "404", "message": "News not found"})
             
         if int(userid) != 100000:
-            users = user.objects.filter(userid=userid)[0]
-            usertags = users.tags
-            usertags = set(usertags.split(','))
-            if news.keywords != None:
-                newskeywords = set(news.keywords.split(','))
-            else:
-                newskeywords = set()
-            weight = eval(users.tagsweight)
-            for keyword in newskeywords:
-                if keyword in weight:
-                    weight[keyword] = float(format(weight[keyword] + 0.01, ".3f"))
-                    if weight[keyword] >= 0.1:
-                        usertags.add(keyword)
-                        user.objects.filter(userid=userid).update(tags=str(",".join(usertags)))
+            user_qs = user.objects.filter(userid=userid)
+            if user_qs.exists():
+                users = user_qs[0]
+                usertags = users.tags
+                usertags = set(usertags.split(','))
+                if news.keywords != None:
+                    newskeywords = set(news.keywords.split(','))
                 else:
-                    weight[keyword] = 0.01
-            user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
+                    newskeywords = set()
+                weight = eval(users.tagsweight)
+                for keyword in newskeywords:
+                    if keyword in weight:
+                        weight[keyword] = float(format(weight[keyword] + 0.01, ".3f"))
+                        if weight[keyword] >= 0.1:
+                            usertags.add(keyword)
+                            user.objects.filter(userid=userid).update(tags=str(",".join(usertags)))
+                    else:
+                        weight[keyword] = 0.01
+                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
 
         temp = givelike.objects.filter(newsid=newsid, userid=userid)
         if len(temp) == 0:
@@ -181,7 +193,7 @@ def getNewsDetailByNewsid(request):
             "pic_url": news.pic_url,
             "videourl": news.videourl,
             "category": news.category,
-            "readnum": int(news.readnum) + 1,
+            "readnum": int(news.readnum),
             "comments": news.comments,
             "origin": news.origin,
             "mainpage": news.mainpage, # 新增正文返回，防止详情页空白
@@ -216,7 +228,7 @@ def newsHistory(request):
         @:param newsid ---> 新闻id
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         newsid = request.GET.get('newsid')
         daytime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         history.objects.create(userid=userid, history_newsid=newsid, time=daytime)
@@ -311,49 +323,65 @@ def updateGiveLike(request):
     '''
     if request.method == "GET":
         newsid = request.GET.get('newsid')
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         like = request.GET.get('like')
         
         if int(like) == 1:
             if int(userid) != 100000:
-                users = user.objects.filter(userid=userid)[0]
-                usertags = users.tags
-                news = newsdetail.objects.filter(news_id=newsid)[0]
-                usertags = set(usertags.split(','))
-                if news.keywords != None:
-                    newskeywords = set(news.keywords.split(','))
-                else:
-                    newskeywords = set()
-                key = usertags & newskeywords
-                key = list(key)
-                if len(key) > 0:
-                    weight = eval(users.tagsweight)
-                    weight[key[0]] = weight.get(key[0]) + 0.01
-                    user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                    
+                try:
+                    user_qs = user.objects.filter(userid=userid)
+                    news_qs = newsdetail.objects.filter(news_id=newsid)
+                    if not user_qs.exists() or not news_qs.exists():
+                        pass  # 用户或新闻不存在，跳过标签更新
+                    else:
+                        users = user_qs[0]
+                        usertags = users.tags
+                        news = news_qs[0]
+                        usertags = set(usertags.split(','))
+                        if news.keywords != None:
+                            newskeywords = set(news.keywords.split(','))
+                        else:
+                            newskeywords = set()
+                        key = usertags & newskeywords
+                        key = list(key)
+                        if len(key) > 0:
+                            weight = eval(users.tagsweight)
+                            weight[key[0]] = weight.get(key[0], 0.0) + 0.01
+                            user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
+                except Exception:
+                    pass  # 标签更新失败不影响核心功能
+
         if int(like) == 2:
             if int(userid) != 100000:
-                users = user.objects.filter(userid=userid)[0]
-                usertags = users.tags
-                news = newsdetail.objects.filter(news_id=newsid)[0]
-                usertags = set(usertags.split(','))
-                if news.keywords != None:
-                    newskeywords = set(news.keywords.split(','))
-                else:
-                    newskeywords = set()
-                for k in newskeywords:
-                    weight = eval(users.tagsweight)
-                    if k in weight:
-                        if weight[k] >= 0.1:
-                            weight[k] = float(format(weight.get(k) - 0.1, ".3f"))
-                            if weight.get(k) > 0:
-                                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                            else:
-                                weight.pop(k)
-                                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                                usertags.remove(k)
-                                newusertags = ','.join(usertags)
-                                user.objects.filter(userid=userid).update(tags=newusertags)
+                try:
+                    user_qs = user.objects.filter(userid=userid)
+                    news_qs = newsdetail.objects.filter(news_id=newsid)
+                    if not user_qs.exists() or not news_qs.exists():
+                        pass
+                    else:
+                        users = user_qs[0]
+                        usertags = users.tags
+                        news = news_qs[0]
+                        usertags = set(usertags.split(','))
+                        if news.keywords != None:
+                            newskeywords = set(news.keywords.split(','))
+                        else:
+                            newskeywords = set()
+                        for k in newskeywords:
+                            weight = eval(users.tagsweight)
+                            if k in weight:
+                                if weight[k] >= 0.1:
+                                    weight[k] = float(format(weight.get(k) - 0.1, ".3f"))
+                                    if weight.get(k) > 0:
+                                        user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
+                                    else:
+                                        weight.pop(k)
+                                        user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
+                                        usertags.remove(k)
+                                        newusertags = ','.join(usertags)
+                                        user.objects.filter(userid=userid).update(tags=newusertags)
+                except Exception:
+                    pass
                                 
         selectres = givelike.objects.filter(userid=userid, newsid=newsid)
         if len(selectres) == 0:
@@ -366,65 +394,75 @@ def updateGiveLike(request):
 
 
 def submitComments(request):
-    '''
-        @Description：提交新闻评论
-    '''
+    """
+        @Description: 提交新闻评论 (防御性版本)
+    """
     if request.method == "POST":
         req = json.loads(request.body)
         userid = req['userid']
         newsid = req['newsid']
         comment = req['comment']
-        
+
+        # 非游客: 尝试更新兴趣标签 (用户/新闻缺失时静默跳过)
         if int(userid) != 100000:
-            users = user.objects.filter(userid=userid)[0]
-            usertags = users.tags
-            news = newsdetail.objects.filter(news_id=newsid)[0]
-            usertags = set(usertags.split(','))
-            if news.keywords != None:
-                newskeywords = set(news.keywords.split(','))
-            else:
-                newskeywords = set()
-            key = usertags & newskeywords
-            key = list(key)
-            if len(key) > 0:
-                weight = eval(users.tagsweight)
-                weight[key[0]] = weight.get(key[0]) + 0.01
-                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                
+            try:
+                users = user.objects.filter(userid=userid).first()
+                news = newsdetail.objects.filter(news_id=newsid).first()
+                if users is not None and news is not None:
+                    usertags = set(users.tags.split(','))
+                    if news.keywords is not None:
+                        newskeywords = set(news.keywords.split(','))
+                    else:
+                        newskeywords = set()
+                    key = list(usertags & newskeywords)
+                    if len(key) > 0:
+                        weight = eval(users.tagsweight)
+                        weight[key[0]] = weight.get(key[0], 0.0) + 0.01
+                        user.objects.filter(userid=userid).update(
+                            tagsweight=str(weight).replace("'", '"'))
+            except Exception:
+                pass
+
         time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         comments(userid=userid, newsid=newsid, comments=comment, time=time_str, status="正常").save()
-        newsdetail.objects.filter(news_id=newsid).update(
-            comments=int(newsdetail.objects.filter(news_id=newsid)[0].comments) + 1)
+        nqs = newsdetail.objects.filter(news_id=newsid)
+        if nqs.exists():
+            newsdetail.objects.filter(news_id=newsid).update(
+                comments=int(nqs[0].comments) + 1)
         return JsonResponse({"status": "200", 'message': 'Success.'})
 
 
 def submitCommenttoUser(request):
-    '''
-        @Description：对用户评论进行回复
-    '''
+    """
+        @Description: 对用户评论进行回复 (防御性版本)
+    """
     if request.method == "POST":
         req = json.loads(request.body)
         userid = req['userid']
         newsid = req['newsid']
         comment = req['comment']
         touserid = req['touserid']
-        
+
+        # 非游客: 尝试更新兴趣标签
         if int(userid) != 100000:
-            users = user.objects.filter(userid=userid)[0]
-            usertags = users.tags
-            news = newsdetail.objects.filter(news_id=newsid)[0]
-            usertags = set(usertags.split(','))
-            if news.keywords != None:
-                newskeywords = set(news.keywords.split(','))
-            else:
-                newskeywords = set()
-            key = usertags & newskeywords
-            key = list(key)
-            if len(key) > 0:
-                weight = eval(users.tagsweight)
-                weight[key[0]] = weight.get(key[0]) + 0.01
-                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                
+            try:
+                users = user.objects.filter(userid=userid).first()
+                news = newsdetail.objects.filter(news_id=newsid).first()
+                if users is not None and news is not None:
+                    usertags = set(users.tags.split(','))
+                    if news.keywords is not None:
+                        newskeywords = set(news.keywords.split(','))
+                    else:
+                        newskeywords = set()
+                    key = list(usertags & newskeywords)
+                    if len(key) > 0:
+                        weight = eval(users.tagsweight)
+                        weight[key[0]] = weight.get(key[0], 0.0) + 0.01
+                        user.objects.filter(userid=userid).update(
+                            tagsweight=str(weight).replace("'", '"'))
+            except Exception:
+                pass
+
         time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         sendMessage = "新的回复了！！请速速查看！！"
         comments(userid=userid, newsid=newsid, comments=comment, time=time_str, touserid=touserid, status="正常").save()
@@ -473,7 +511,7 @@ def updateRecHis(request):
         @Description：更新推荐列表阅读历史/更改推荐新闻已读状态
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         newsid = request.GET.get('newsid')
         recommend.objects.filter(newsid=newsid, userid=userid).update(hadread=1)
         return JsonResponse({"status": "200", 'message': 'Success.'})

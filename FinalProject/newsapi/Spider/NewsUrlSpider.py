@@ -29,6 +29,19 @@ def urlcollect(lid):
     """
     使用新浪新闻 API 进行 URL 采集，自动去重入库
     """
+    # === 协作式取消: 每次执行前检查 DB 开关状态 (spiderid=1) ===
+    try:
+        with OperationMysql() as guard_db:
+            rows = guard_db.search_all(
+                "SELECT status FROM news_api_spiderstate WHERE spiderid=1 LIMIT 1"
+            )
+            if rows and rows[0].get('status') == 0:
+                logger.info("检测到 DB 关闭信号(spiderid=1), 爬虫主动退出当前周期并关闭调度器")
+                sched.shutdown(wait=False)
+                return
+    except Exception as guard_err:
+        logger.warning(f"DB状态检查异常(不影响主流程): {guard_err}")
+
     # 自动管理数据库连接的生命周期
     with OperationMysql() as op_mysql:
         url = f'https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid={lid}&num=50' 
@@ -84,8 +97,9 @@ def begincollect(time):
         logger.error('调度器启动错误:' + str(e))
 
 def endsched():
+    """停止调度器 (wait=False 确保从请求线程立即终止)"""
     try:
-        sched.shutdown()
+        sched.shutdown(wait=False)
     except Exception as e:
         logger.info("Url爬虫调度器原本未运行或已关闭，忽略此操作。")
         pass

@@ -46,6 +46,33 @@ DASHSCOPE_CONFIG = {
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
 }
 
+# ==================== DeepSeek 配置 ====================
+DEEPSEEK_CONFIG = {
+    # API Key (从环境变量 DEEPSEEK_API_KEY 或 Django settings 中读取)
+    # 获取方式: https://platform.deepseek.com/ → API Keys
+    "api_key": "",  # 留空, 实际从 settings.DEEPSEEK_API_KEY 或环境变量读取
+
+    # 可用模型列表
+    "models": {
+        "deepseek-v4-flash": "deepseek-v4-flash",     # 快速推理（推荐用于推荐场景）
+        "deepseek-chat": "deepseek-chat",             # 通用对话
+        "deepseek-reasoner": "deepseek-reasoner",     # 深度推理
+    },
+
+    # 默认使用的模型
+    "default_model": "deepseek-v4-flash",
+
+    # API 端点 (OpenAI 兼容接口)
+    "base_url": "https://api.deepseek.com",
+
+    # 调用参数
+    "generation_params": {
+        "max_tokens": 1024,
+        "temperature": 0.7,
+        "top_p": 0.9,
+    },
+}
+
 # ==================== 魔塔社区（ModelScope）配置 ====================
 MODELSCOPE_CONFIG = {
     # API Token（请确保已替换为真实Token）

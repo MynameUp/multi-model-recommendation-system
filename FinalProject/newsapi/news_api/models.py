@@ -28,6 +28,10 @@ class user(models.Model):
     tags = models.CharField(max_length=2000)
     tagsweight = models.CharField(max_length=2000)
     headPortrait = models.CharField(max_length=255)
+    agent_summary_memory = models.TextField(
+        blank=True, null=True,
+        verbose_name="Agent长期记忆摘要"
+    )  # Phase 4.2: LLM 压缩的长期兴趣画像
     objects = models.Manager()
 
 
@@ -134,3 +138,37 @@ class urlcollect(models.Model):
 
     class Meta:
         db_table = 'news_api_urlcollect'
+
+
+# =============================================================================
+#  Phase 3: LLM Agent 上下文记忆模型
+# =============================================================================
+
+class AgentConversation(models.Model):
+    """
+        @Description: Agent 多轮对话记忆模型
+        存储用户与 DeepSeek 推荐智能体的历史对话，用于构建 LLM 上下文记忆
+
+        @Attributes:
+            id (AutoField): 自增主键
+            userid (IntegerField): 用户 ID (关联 user 表)
+            role (CharField): 消息角色 — 'user' 或 'assistant'
+            content (TextField): 消息内容
+            intent_json (TextField): Agent 解析出的意图 JSON (仅 assistant 消息填充)
+            created_at (DateTimeField): 创建时间 (自动)
+    """
+    id = models.AutoField(primary_key=True)
+    userid = models.IntegerField(db_index=True)
+    role = models.CharField(max_length=16)       # 'user' | 'assistant'
+    content = models.TextField()
+    intent_json = models.TextField(null=True, blank=True)  # Agent 意图快照
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = models.Manager()
+
+    class Meta:
+        db_table = 'news_api_agent_conversation'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['userid', 'created_at']),
+        ]

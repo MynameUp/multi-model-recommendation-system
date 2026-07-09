@@ -8,6 +8,16 @@ import os
 from django.conf import settings
 from django.conf.urls.static import static
 
+
+def safe_userid(raw_value, default=100000):
+    """防御性 userid 解析: 非数字/None → 默认游客ID 100000"""
+    if raw_value is None or raw_value == '':
+        return default
+    try:
+        return int(raw_value)
+    except (ValueError, TypeError):
+        return default
+
 def add_user(request):
     '''
         @Description：管理员新增用户
@@ -63,15 +73,14 @@ def del_comments(request):
         @Description：管理员获取所有评论信息
     '''
     if request.method == "GET":
-        commentsid = request.GET.get('commentsid')
+        commentsid = safe_userid(request.GET.get('commentsid'), default=0)
         newsid = request.GET.get('newsid')
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         choose = int(request.GET.get('choose'))
         print(choose)
         if choose == 1:
             res = comments.objects.filter(id=commentsid).update(status="封禁")
-            sendMessage = "尊敬的用户您好，您在标题《" + newsdetail.objects.filter(news_id=newsid)[
-                0].title + "》的新闻评论，存在言论不当的问题，评论内容已被管理员封禁！"
+            sendMessage = "尊敬的用户您好，您在标题《" + (newsdetail.objects.filter(news_id=newsid).first().title if newsdetail.objects.filter(news_id=newsid).exists() else '未知新闻') + "》的新闻评论，存在言论不当的问题，评论内容已被管理员封禁！"
             time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             message(userid=userid, message=sendMessage, newsid=newsid, time=time, title="来自管理员的信息", hadread=0).save()
             if res == 0:
@@ -80,8 +89,7 @@ def del_comments(request):
                 return JsonResponse({"status": "100", "message": "Success."})
         elif choose == 0:
             res = comments.objects.filter(id=commentsid).update(status="正常")
-            sendMessage = "尊敬的用户您好，您在标题《" + newsdetail.objects.filter(news_id=newsid)[
-                0].title + "》的新闻评论，已被管理员解除封禁，给您带来不便，十分抱歉！"
+            sendMessage = "尊敬的用户您好，您在标题《" + (newsdetail.objects.filter(news_id=newsid).first().title if newsdetail.objects.filter(news_id=newsid).exists() else '未知新闻') + "》的新闻评论，已被管理员解除封禁，给您带来不便，十分抱歉！"
             time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             message(userid=userid, message=sendMessage, newsid=newsid, time=time, title="来自管理员的信息", hadread=0).save()
             if res == 0:
@@ -96,7 +104,7 @@ def del_user(request):
         @:param userid---用户id
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         # print(user.objects.filter(userid=userid).delete()[0])
         if user.objects.filter(userid=userid).delete()[0] == 0:
             return JsonResponse({"status": "100", "message": "Fail."})
@@ -129,117 +137,168 @@ def up_user(request):
 
 
 def user_login(request):
-    '''
-        @Description：用户登录
-        @:param userid---用户id
-        @:param password---用户密码
-    '''
+    """
+        @Description: 用户登录 (防御性版本)
+    """
     if request.method == "POST":
-        req = json.loads(request.body)
-        userid = req['userid']
-        password = req['password']
+        try:
+            req = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({"status": "400", "message": "无效的请求格式"})
+
+        userid_raw = str(req.get('userid', '')).strip()
+        password = req.get('password', '')
+
+        if not userid_raw or not password:
+            return JsonResponse({"status": "400", "message": "账号和密码不能为空"})
+
+        # 纯数字校验
+        if not userid_raw.isdigit():
+            return JsonResponse({"status": "400", "message": "账号必须为纯数字"})
+
+        userid = int(userid_raw)
         res = user.objects.filter(userid=userid, password=password)
-        if len(res) > 0:
-            # print(res[0].userid)
-            # res[0].userid
-            username = res[0].username
-            if res[0].gender == 1:
-                gender = '男'
-            else:
-                gender = '女'
-            pict = res[0].headPortrait
-            data = {
-                "userid": userid,
-                "username": username,
-                "gender": gender,
-                "headPortrait": pict,
-            }
+        if len(res) == 0:
+            return JsonResponse({"status": "400", "message": "账号或密码错误"})
+
+        u = res[0]
+        data = {
+            "userid": u.userid,
+            "username": u.username,
+            "gender": '男' if u.gender == 1 else '女',
+            "headPortrait": u.headPortrait or "default.jpg",
+        }
+
+        # 更新登录 IP
+        try:
             ip = get_ip(request)
-            print(ip)
             user.objects.filter(userid=userid).update(ip=str(ip))
-            if int(userid) != 100000:
-                users = user.objects.filter(userid=userid)[0]
-                usertags = set(users.tags.split(','))
-                if len(users.tagsweight) > 0:
-                    weight = eval(users.tagsweight)
-                    for item in list(weight):
+        except Exception:
+            pass
+
+        # 非游客: 标签衰减
+        if str(u.userid) != '100000':
+            try:
+                usertags = set(u.tags.split(',')) if u.tags else set()
+                if u.tagsweight and len(u.tagsweight) > 0:
+                    weight = eval(u.tagsweight) if isinstance(u.tagsweight, str) else u.tagsweight
+                    for item in list(weight.keys()):
                         if weight[item] >= 0.05:
-                            weight[item] = float(format(weight.get(item) - 0.15, ".3f"))
-                            if weight.get(item) > 0:
-                                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                            else:
-                                weight.pop(item)
-                                print('weight', weight)
-                                user.objects.filter(userid=userid).update(tagsweight=str(weight).replace("\'", "\""))
-                                try:
-                                    usertags.remove(item)
-                                except Exception:
-                                    print(Exception)
-                                newusertags = ','.join(usertags)
-                                user.objects.filter(userid=userid).update(tags=newusertags)
-        if len(res):
-            return JsonResponse({"status": "100", "message": "Success.", "data": data})
-        else:
-            return JsonResponse({"status": "400", "message": "Fail."})
+                            weight[item] = float(format(weight[item] - 0.15, ".3f"))
+                            if weight[item] <= 0:
+                                weight.pop(item, None)
+                                usertags.discard(item)
+                    new_tags = ','.join(usertags) if usertags else '综合'
+                    new_weight = str(weight).replace("'", '"')
+                    user.objects.filter(userid=userid).update(tags=new_tags, tagsweight=new_weight)
+            except Exception:
+                pass
+
+        return JsonResponse({"status": "100", "message": "Success.", "data": data})
+    return JsonResponse({"status": "400", "message": "仅支持POST请求"})
 
 
 def tourists_login(request):
     if request.method == "GET":
-        tourist = user.objects.filter(userid=100000)[0]
+        # 容错: 如果游客账号不存在则自动创建 (修复冷启动 500 崩溃)
+        tourist_qs = user.objects.filter(userid=100000)
+        if tourist_qs.exists():
+            tourist = tourist_qs[0]
+        else:
+            tourist = user(
+                userid=100000,
+                username="游客",
+                password="tourist_guest",
+                gender=1,
+                ip="127.0.0.1",
+                tags="综合,社会,科技,财经",
+                tagsweight='{"综合":0.5,"社会":0.5,"科技":0.5,"财经":0.5}',
+                headPortrait="default.jpg"
+            )
+            tourist.save()
         data = {
             'userid': 100000,
             'username': "游客",
             "gender": '男',
-            "headPortrait": tourist.headPortrait,
+            "headPortrait": tourist.headPortrait if tourist.headPortrait else "default.jpg",
         }
         return JsonResponse({"status": "100", "message": "Success.", "data": data})
     return JsonResponse({"status": "100", "message": "Fail."})
 
 
 def user_register(request):
-    '''
-        @Description：用户注册
-        @:param userid---用户 id
-        @:param username---用户名
-        @:param password---用户密码
-        @:param tags---用户自选标签
-        @:return JsonResponse---包含注册状态的 JSON 响应
-            - status: 200 表示成功，400 表示失败
-            - message: "Success."或"Fail."
-    '''
+    """
+        @Description: 用户注册 (防御性版本)
+        - 强制校验 userid 为纯数字
+        - 防止与游客账号 100000 主键冲突
+        - 返回真实 userid 供前端存储
+    """
     if request.method == "POST":
-        req = json.loads(request.body)
-        userid = req['userid']
-        password = req['password']
-        username = req['username']
-        gender = req['gender']
+        try:
+            req = json.loads(request.body)
+            userid_raw = str(req.get('userid', '')).strip()
+            password = req.get('password', '')
+            username = req.get('username', '')
+            gender = req.get('gender', '男')
+            tags = req.get('tags', '')
 
-        # 将性别字符串转换为整数标识（1 代表男，0 代表女）
-        if gender == '男':
-            gender = 1
-        elif gender == '女':
-            gender = 0
-        tags = req['tags']
+            # === 纯数字校验 (防止字符串污染) ===
+            if not userid_raw.isdigit():
+                return JsonResponse({"status": "400", "message": "账号必须为纯数字"})
+            userid = int(userid_raw)
 
-        # 获取用户注册时的 IP 地址
-        ip = get_ip(request)
+            # === 防止与游客账号冲突 ===
+            if userid == 100000:
+                return JsonResponse({"status": "400", "message": "该账号为系统保留账号，请使用其他账号"})
 
-        # 初始化用户标签权重字典，每个自选标签的初始权重为 0.5
-        tagsweight = {}
-        tag = str(tags).split(",")
-        for i in tag:
-            tagsweight[i] = 0.5
-        print(tagsweight)
+            # === 防止重复注册 ===
+            if user.objects.filter(userid=userid).exists():
+                return JsonResponse({"status": "400", "message": "账号已存在"})
 
-        # 将字典转换为 JSON 格式字符串（替换单引号为双引号以符合 JSON 标准）
-        tagsweight = str(tagsweight).replace("\'", "\"")
+            if not password:
+                return JsonResponse({"status": "400", "message": "密码不能为空"})
+            if not username:
+                username = f"用户{userid}"  # 未填用户名时使用默认昵称
 
-        # 创建新用户对象并保存到数据库
-        add_user = user(userid=userid, username=username, gender=gender, ip=ip, password=password, tags=tags,
-                        tagsweight=tagsweight)
-        add_user.save()
-        return JsonResponse({"status": 200, "message": "Success."})
-    return JsonResponse({"status": 200, "message": "Fail."})
+            # 将性别字符串转换为整数标识（1 代表男，0 代表女）
+            if gender == '男':
+                gender = 1
+            elif gender == '女':
+                gender = 0
+            else:
+                gender = 1
+
+            # 获取用户注册时的 IP 地址
+            ip = get_ip(request)
+
+            # 初始化用户标签权重字典
+            tagsweight = {}
+            if tags:
+                for t in str(tags).split(","):
+                    t = t.strip()
+                    if t:
+                        tagsweight[t] = 0.5
+            if not tagsweight:
+                tags = "综合"
+                tagsweight = {"综合": 0.5}
+            tagsweight = json.dumps(tagsweight, ensure_ascii=False)
+
+            # 创建新用户
+            new_user = user(userid=userid, username=username, gender=gender, ip=ip,
+                           password=password, tags=tags, tagsweight=tagsweight)
+            new_user.save()
+
+            # 返回 data 对象, 前端需要用 userid
+            return JsonResponse({
+                "status": 200,
+                "message": "Success.",
+                "data": {"userid": userid, "username": username}
+            })
+        except json.JSONDecodeError:
+            return JsonResponse({"status": "400", "message": "无效的请求格式"})
+        except Exception as e:
+            return JsonResponse({"status": "500", "message": f"注册失败: {str(e)}"})
+    return JsonResponse({"status": "400", "message": "仅支持POST请求"})
 
 
 def get_ip(request):
@@ -258,7 +317,7 @@ def getHistory(request):
        @:param userid---用户id
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         historylist = history.objects.filter(userid=userid).order_by('-id')
         newslist = dict()
         for historyitem in historylist:
@@ -281,35 +340,39 @@ def getRecNes(request):
        @:param userid---用户id
    '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
+        recnewsdetaillist = list()
         if userid != None:
             recnewslist = recommend.objects.filter(userid=userid, hadread=0).order_by('-time')
-            recnewsdetaillist = list()
             for renews in recnewslist:
                 recnewsdetailfromdata = newsdetail.objects.filter(news_id=renews.newsid)
-                data = {
-                    'newsid': recnewsdetailfromdata[0].news_id,
-                    'title': recnewsdetailfromdata[0].title,
-                    'date': recnewsdetailfromdata[0].date,
-                    'species': renews.species,
-                    'pic_url': recnewsdetailfromdata[0].pic_url,
-                    'mainpage': recnewsdetailfromdata[0].mainpage,
-                    'readnum': recnewsdetailfromdata[0].readnum,
-                    'comments': recnewsdetailfromdata[0].comments,
-                }
-                recnewsdetaillist.append(data)
+                if recnewsdetailfromdata.exists():
+                    data = {
+                        'newsid': recnewsdetailfromdata[0].news_id,
+                        'title': recnewsdetailfromdata[0].title,
+                        'date': recnewsdetailfromdata[0].date,
+                        'species': renews.species,
+                        'pic_url': recnewsdetailfromdata[0].pic_url,
+                        'mainpage': recnewsdetailfromdata[0].mainpage,
+                        'readnum': recnewsdetailfromdata[0].readnum,
+                        'comments': recnewsdetailfromdata[0].comments,
+                    }
+                    recnewsdetaillist.append(data)
         return JsonResponse({"status": "200", 'newslist': recnewsdetaillist})
     else:
-        return JsonResponse({"status": "200", 'newslist': None})
+        return JsonResponse({"status": "200", 'newslist': []})
 
 
 def getUserMessage(request):
     '''
-        @Description：获取用户推荐新闻
+        @Description：获取用户信息
         @:param userid---用户id
     '''
-    userid = request.GET.get('userid')
-    userdetail = user.objects.filter(userid=userid)[0]
+    userid = safe_userid(request.GET.get('userid'))
+    user_qs = user.objects.filter(userid=userid)
+    if not user_qs.exists():
+        return JsonResponse({"status": "404", "message": "用户不存在"})
+    userdetail = user_qs[0]
     if userdetail.gender == 1:
         gender = '男'
     else:
@@ -335,27 +398,31 @@ def getUserMessage(request):
 
 
 def up_user_by_user(request):
-    '''
-        @Description：用户更新用户信息
-        @:param userid---用户id
-        @:param username---用户名
-        @:param gender---性别
-    '''
+    """
+        @Description: 用户更新个人信息 (防御性版本)
+    """
     if request.method == "POST":
-        req = json.loads(request.body)
-        userid = req['userid']
-        username = req['username']
-        gender = req['gender']
-        if gender == '男':
-            gender = 1
-        else:
-            gender = 0
-        res = user.objects.filter(userid=userid).update(userid=userid, username=username, gender=gender)
-        # print(res)
-        if res == 0:
-            return JsonResponse({"status": "100", "message": "Fail."})
-        else:
-            return JsonResponse({"status": "100", "message": "Success."})
+        try:
+            req = json.loads(request.body)
+            userid = safe_userid(req.get('userid'))
+            username = req.get('username', '').strip()
+            gender = req.get('gender', '男')
+
+            if not user.objects.filter(userid=userid).exists():
+                return JsonResponse({"status": "404", "message": "用户不存在"})
+
+            if gender == '男':
+                gender = 1
+            else:
+                gender = 0
+
+            user.objects.filter(userid=userid).update(username=username, gender=gender)
+            return JsonResponse({"status": "100", "message": "更新成功"})
+        except json.JSONDecodeError:
+            return JsonResponse({"status": "400", "message": "无效的请求格式"})
+        except Exception as e:
+            return JsonResponse({"status": "500", "message": f"更新失败: {str(e)}"})
+    return JsonResponse({"status": "400", "message": "仅支持POST请求"})
 
 
 def up_tags(request):
@@ -368,7 +435,10 @@ def up_tags(request):
         req = json.loads(request.body)
         userid = req['userid']
         tags = req['tags']
-        userdetail = user.objects.filter(userid=userid)[0]
+        user_qs = user.objects.filter(userid=userid)
+        if not user_qs.exists():
+            return JsonResponse({"status": "404", "message": "用户不存在"})
+        userdetail = user_qs[0]
         if userdetail.tagsweight != None:
             oringin_weight = json.loads(str(userdetail.tagsweight))
         else:
@@ -393,7 +463,7 @@ def getMessage(request):
         @:param userid --> 用户ID
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         print(userid)
         messagelist = message.objects.filter(userid=userid)
         mlist = list()
@@ -416,7 +486,7 @@ def getTip(request):
         @:param userid --> 用户ID
     '''
     if request.method == "GET":
-        userid = request.GET.get('userid')
+        userid = safe_userid(request.GET.get('userid'))
         if userid != None:
             if len(message.objects.filter(userid=userid, hadread=0)):
                 return JsonResponse({"status": "100", "message": 1})

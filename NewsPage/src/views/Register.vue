@@ -232,8 +232,8 @@ export default {
       this.isShowLoading = true;
       register(this.account, this.pwd, this.username, String(this.taglist.join()), this.gender).then((res) => {
         if (res.message === 'Success.') {
-          sessionStorage.setItem('userId', this.account);
-          sessionStorage.setItem('userName', this.username);
+          sessionStorage.setItem('userId', res.data.userid);  // 使用后端返回的真实数字ID
+          sessionStorage.setItem('userName', res.data.username);  // 使用后端返回的用户名，防止本地值与服务端不一致
           sessionStorage.setItem('token', 'i_am_token');
           this.$router.push({ path: this.redirect || '/' });
           this.$Message.success('成功注册！欢迎加入！');
@@ -252,6 +252,7 @@ export default {
         login(this.account, this.pwd).then((res) => {
           if (res.message === 'Success.') {
             sessionStorage.setItem('userId', res.data.userid);
+            sessionStorage.setItem('userName', res.data.username);
             sessionStorage.setItem('token', 'i_am_token');
             this.$router.push({ path: this.redirect || '/' });
             this.$Message.success('登录成功！');

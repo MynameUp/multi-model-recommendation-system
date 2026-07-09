@@ -50,7 +50,6 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
     # 'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -179,6 +178,20 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 # 启动时自动创建 media 文件夹
 if not os.path.exists(MEDIA_ROOT):
     os.makedirs(MEDIA_ROOT, exist_ok=True)
+
+# ==================== LLM / AI 配置 ====================
+# DeepSeek API 配置 (推荐智能体)
+# 获取 API Key: https://platform.deepseek.com/ → API Keys
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', 'sk-your-deepseek-api-key-here')
+DEEPSEEK_BASE_URL = os.environ.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-v4-flash')
+
+# PromptMM Student 模型权重路径 (在线推理引擎)
+# 运行导出脚本生成: cd PromptMM/codes && python export_for_online.py
+PROMPTMM_WEIGHTS_DIR = os.environ.get(
+    'PROMPTMM_WEIGHTS_DIR',
+    os.path.join(BASE_DIR, 'Recommend', 'weights')
+)
 
 # 文件上传限制 (2MB)
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024 

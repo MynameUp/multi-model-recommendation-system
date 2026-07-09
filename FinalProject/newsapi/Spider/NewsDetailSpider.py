@@ -228,6 +228,19 @@ def getdatabaseurl():
 # Spider/NewsDetailSpider.py
 
 def insertalldetial():
+    # === 协作式取消: 每次执行前检查 DB 开关状态 (spiderid=2, 必须在 Selenium 启动前) ===
+    try:
+        with OperationMysql() as guard_db:
+            rows = guard_db.search_all(
+                "SELECT status FROM news_api_spiderstate WHERE spiderid=2 LIMIT 1"
+            )
+            if rows and rows[0].get('status') == 0:
+                logger.info("检测到 DB 关闭信号(spiderid=2), 爬虫主动退出当前周期并关闭调度器")
+                sched.shutdown(wait=False)
+                return
+    except Exception as guard_err:
+        logger.warning(f"DB状态检查异常(不影响主流程): {guard_err}")
+
     with OperationMysql() as db:
         # 1. 查找所有未处理的 URL
         sql_s = "SELECT * FROM news_api_urlcollect WHERE handle=0"
@@ -302,9 +315,9 @@ def begindetailcollect(time):  # 💡 统一参数名为 time
 
 
 def endsched():
-    """停止调度器"""
+    """停止调度器 (wait=False 确保从请求线程立即终止, 不等待当前 job 完成)"""
     try:
-        sched.shutdown()
+        sched.shutdown(wait=False)
         logger.info("调度器已成功关闭")
     except Exception:
         logger.info("调度器未运行，无需关闭")

@@ -136,6 +136,51 @@ export default {
             window.location.href = url
             this.$Loading.finish()
         },
+        fetchData() {
+            getSpiderPageData().then((res) => {
+                const msg = res.message
+                this.urlstate = Number(msg.spiderstatelist[1][0]) === 1
+                this.detailstate = Number(msg.spiderstatelist[2][0]) === 1
+                this.urltime = msg.spiderstatelist[1][1]
+                this.detailtime = msg.spiderstatelist[2][1]
+
+                // 清空并重建图表数据
+                this.xData = []
+                this.yData = []
+                Object.keys(msg.statistical).forEach((key) => {
+                    this.xData.push(key)
+                    this.yData.push(msg.statistical[key])
+                })
+
+                this.$nextTick(() => {
+                    if (this.$refs.chart_line_one) {
+                        this.$refs.chart_line_one.initChart(this.name, this.xData, this.yData)
+                    }
+                })
+
+                const ignoreLogs = ['clg.log', 'hlg.log', 'rlg.log', 'log.log']
+
+                this.UrlData = []
+                Object.keys(msg.urlloglist).forEach((key) => {
+                    if (ignoreLogs.includes(key)) return
+                    this.UrlData.push({
+                        name: key,
+                        date: msg.urlloglist[key].time,
+                        downloadlurl: msg.urlloglist[key].filepath,
+                    })
+                })
+
+                this.DetailData = []
+                Object.keys(msg.detaillist).forEach((key) => {
+                    if (ignoreLogs.includes(key)) return
+                    this.DetailData.push({
+                        name: key,
+                        date: msg.detaillist[key].time,
+                        downloadlurl: msg.detaillist[key].filepath,
+                    })
+                })
+            })
+        },
         BeginDetailSpider() {
             if (this.detailstate) {
                 const seconds = this.parseTimeToSeconds(this.detailtime)
@@ -143,13 +188,16 @@ export default {
                     this.$Message.error('请选择间隔时间')
                     this.detailstate = false
                 } else {
-                    detailspider(seconds, this.detailtime)
-                    this.$Message.info('详情爬虫状态：打开')
+                    detailspider(seconds, this.detailtime).then(() => {
+                        this.$Message.info('详情爬虫状态：打开')
+                        this.fetchData()
+                    })
                 }
             } else {
                 closedetailspider().then((res) => {
-                    if (res.message === 'Success.') {
+                    if (res.message === '已关闭') {
                         this.$Message.info('详情爬虫状态：关闭')
+                        this.fetchData()
                     }
                 })
             }
@@ -161,13 +209,16 @@ export default {
                     this.$Message.error('请选择间隔时间')
                     this.urlstate = false
                 } else {
-                    urlspider(seconds, this.urltime)
-                    this.$Message.info('Url爬虫状态：打开')
+                    urlspider(seconds, this.urltime).then(() => {
+                        this.$Message.info('Url爬虫状态：打开')
+                        this.fetchData()
+                    })
                 }
             } else {
                 closeurlspider().then((res) => {
-                    if (res.message === 'Success.') {
+                    if (res.message === '已关闭') {
                         this.$Message.info('Url爬虫状态：关闭')
+                        this.fetchData()
                     }
                 })
             }
@@ -176,45 +227,7 @@ export default {
     created() {
         window.addEventListener('resize', this.changeHeight)
         this.changeHeight()
-
-        getSpiderPageData().then((res) => {
-            const msg = res.message
-            this.urlstate = Number(msg.spiderstatelist[1][0]) === 1
-            this.detailstate = Number(msg.spiderstatelist[2][0]) === 1
-            this.urltime = msg.spiderstatelist[1][1]
-            this.detailtime = msg.spiderstatelist[2][1]
-
-            Object.keys(msg.statistical).forEach((key) => {
-                this.xData.push(key)
-                this.yData.push(msg.statistical[key])
-            })
-
-            this.$nextTick(() => {
-                if (this.$refs.chart_line_one) {
-                    this.$refs.chart_line_one.initChart(this.name, this.xData, this.yData)
-                }
-            })
-
-            const ignoreLogs = ['clg.log', 'hlg.log', 'rlg.log', 'log.log']
-
-            Object.keys(msg.urlloglist).forEach((key) => {
-                if (ignoreLogs.includes(key)) return
-                this.UrlData.push({
-                    name: key,
-                    date: msg.urlloglist[key].time,
-                    downloadlurl: msg.urlloglist[key].filepath, // [修复] 末尾补逗号
-                })
-            })
-
-            Object.keys(msg.detaillist).forEach((key) => {
-                if (ignoreLogs.includes(key)) return
-                this.DetailData.push({
-                    name: key,
-                    date: msg.detaillist[key].time,
-                    downloadlurl: msg.detaillist[key].filepath, // [修复] 末尾补逗号
-                })
-            })
-        })
+        this.fetchData()
     },
 }
 </script>
